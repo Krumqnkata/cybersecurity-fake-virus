@@ -32,6 +32,20 @@ class LocalPagesTests(unittest.TestCase):
             urllib.request.urlopen(bad_url, timeout=3)
         self.assertEqual(caught.exception.code, 404)
 
+    def test_page_action_is_queued_by_the_loopback_post(self):
+        request = urllib.request.Request(self.pages.action_url(2), data=b'', method='POST')
+        with urllib.request.urlopen(request, timeout=3) as response:
+            self.assertEqual(response.status, 202)
+            self.assertEqual(json.loads(response.read()), {'accepted': True})
+
+        self.assertEqual(self.pages.drain_actions(), [2])
+        self.assertEqual(self.pages.drain_actions(), [])
+
+        with urllib.request.urlopen(self.pages.url(2), timeout=3) as response:
+            html = response.read().decode('utf-8')
+        self.assertIn('/action/2', html)
+        self.assertNotIn('Заявката не може да бъде изпълнена', html)
+
 
 class NativeSessionTests(unittest.TestCase):
     def setUp(self):
@@ -56,6 +70,22 @@ class NativeSessionTests(unittest.TestCase):
         locked.unlink()
 
         self.assertIn(plain.name, self.session.restore_files())
+
+
+class BrowserActionDispatchTests(unittest.TestCase):
+    def test_each_page_dispatches_its_matching_safe_scene(self):
+        class FakeClassroom:
+            def __init__(self):
+                self.scenes = []
+
+            def spawn(self, scene):
+                self.scenes.append(scene)
+
+        fake = FakeClassroom()
+        for index in range(len(classroom.PAGE_ACTION_SCENES)):
+            classroom.Classroom.handle_page_action(fake, index)
+
+        self.assertEqual(fake.scenes, list(classroom.PAGE_ACTION_SCENES))
 
 
 @unittest.skipIf(classroom.Image is None, 'Pillow is not installed')

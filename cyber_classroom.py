@@ -506,6 +506,7 @@ main{margin:7vh auto 30px;width:min(1000px,88vw);background:white;padding:42px 5
 h1{font-size:clamp(28px,4vw,48px);line-height:1.15;color:ACCENT;margin:12px 0 25px}p{line-height:1.55}
 .tag{font-size:14px;letter-spacing:2px;color:#718299}.timer{font-size:44px;font-weight:700;color:ACCENT;font-variant-numeric:tabular-nums;margin:23px 0}
 button{padding:18px 30px;background:ACCENT;color:white;border:0;font:700 19px "Segoe UI",sans-serif;cursor:pointer}
+button:disabled{cursor:default;opacity:.72}
 .track{height:8px;background:#e6ecf3;margin:30px 0 18px}.bar{height:100%;width:0;background:ACCENT}
 footer{margin-top:26px;color:#7e8da0;font-size:14px}#notice{min-height:28px;color:#a0253b;font-size:17px}
 body.paused .dot{background:#edc469}.hint{font-size:15px;color:#647991}
@@ -515,12 +516,16 @@ body.paused .dot{background:#edc469}.hint{font-size:15px;color:#647991}
 <p class="hint" id="state">Проверка на състоянието…</p><div id="notice"></div>
 <footer>Локална страница за демонстрация. Няма плащане, вход в профил или изтегляне на софтуер.</footer></main>
 <script nonce="NONCE">
-document.getElementById('action').addEventListener('click',()=>{document.getElementById('notice').textContent='Заявката не може да бъде изпълнена. Опитайте по-късно.';});
+const actionButton=document.getElementById('action'),notice=document.getElementById('notice');
+actionButton.addEventListener('click',async()=>{actionButton.disabled=true;notice.textContent='Стартиране на учебната сцена…';
+try{const r=await fetch(ACTION_URL,{method:'POST',cache:'no-store',credentials:'omit'});if(!r.ok)throw new Error();
+notice.textContent='Учебното действие е стартирано. Няма реално изтегляне или инсталация.';
+}catch(e){notice.textContent='Локалната учебна връзка е прекъсната.';actionButton.disabled=false;}});
 async function poll(){try{const r=await fetch(STATE_URL,{cache:'no-store'});if(!r.ok)throw new Error();const s=await r.json();
 document.body.classList.toggle('paused',s.paused);let n=Math.max(0,119-Math.floor(s.time)%120);
 document.getElementById('timer').textContent=String(Math.floor(n/60)).padStart(2,'0')+':'+String(n%60).padStart(2,'0');
 document.getElementById('bar').style.width=String(Math.floor(s.time*1.7)%101)+'%';
-document.getElementById('state').textContent=s.paused?'Пауза на демонстрацията':('Отворени учебни раздели: '+s.tabs+' • Изчакване на отговор…');
+document.getElementById('state').textContent=s.paused?'Пауза на демонстрацията':('Отворени учебни раздели: '+s.tabs+' • Локалната връзка е активна');
 }catch(e){document.getElementById('state').textContent='Демонстрацията е приключила.';}setTimeout(poll,500);}poll();
 </script></html>'''
 WEB_PAGES = [
@@ -543,6 +548,7 @@ WEB_PAGES = [
      'Едно натискане обещава да реши „всички проблеми“. Резултатите на тази страница са измислени.',
      'ПОПРАВИ ВСИЧКО','#26786c'),
 ]
+PAGE_ACTION_SCENES = ('installer', 'advert', 'scanner', 'warning', 'installer', 'scanner')
 
 
 class LocalPages:
@@ -550,22 +556,14 @@ class LocalPages:
     def __init__(self):
         self.token=secrets.token_hex(20)
         self.state={'time':0,'paused':False,'tabs':0}
+        self.actions=queue.Queue(maxsize=20)
         owner=self
         class Handler(BaseHTTPRequestHandler):
             def log_message(self,*args):
                 pass
-            def do_GET(self):
-                prefix='/'+owner.token+'/'
-                if not self.path.startswith(prefix):
-                    self.send_error(404); return
-                path=self.path[len(prefix):]
-                if path=='state':
-                    payload=json.dumps(owner.state).encode('utf-8'); mime='application/json'
-                elif path.startswith('tab/') and path[4:].isdigit() and 0<=int(path[4:])<20:
-                    payload=owner.page(int(path[4:])).encode('utf-8'); mime='text/html'
-                else:
-                    self.send_error(404); return
-                self.send_response(200)
+
+            def send_payload(self,status,payload,mime):
+                self.send_response(status)
                 self.send_header('Content-Type',mime+'; charset=utf-8')
                 self.send_header('Content-Length',str(len(payload)))
                 self.send_header('Cache-Control','no-store')
@@ -582,6 +580,36 @@ class LocalPages:
                     # closing.  On Windows that is commonly WSAECONNABORTED and is
                     # an expected disconnect, not an application error.
                     pass
+
+            def do_GET(self):
+                prefix='/'+owner.token+'/'
+                if not self.path.startswith(prefix):
+                    self.send_error(404); return
+                path=self.path[len(prefix):]
+                if path=='state':
+                    payload=json.dumps(owner.state).encode('utf-8'); mime='application/json'
+                elif path.startswith('tab/') and path[4:].isdigit() and 0<=int(path[4:])<20:
+                    payload=owner.page(int(path[4:])).encode('utf-8'); mime='text/html'
+                else:
+                    self.send_error(404); return
+                self.send_payload(200,payload,mime)
+
+            def do_POST(self):
+                prefix='/'+owner.token+'/action/'
+                index=self.path[len(prefix):] if self.path.startswith(prefix) else ''
+                try:
+                    content_length=int(self.headers.get('Content-Length','0') or 0)
+                except ValueError:
+                    self.send_error(400); return
+                if (not index.isdigit() or not 0<=int(index)<20 or content_length!=0):
+                    self.send_error(404); return
+                try:
+                    owner.actions.put_nowait(int(index))
+                    payload=b'{"accepted":true}'
+                    self.send_payload(202,payload,'application/json')
+                except queue.Full:
+                    payload=b'{"accepted":false}'
+                    self.send_payload(429,payload,'application/json')
         self.server=ThreadingHTTPServer(('127.0.0.1',0),Handler)
         self.thread=threading.Thread(target=lambda:self.server.serve_forever(poll_interval=.1),daemon=True)
         self.thread.start()
@@ -591,12 +619,25 @@ class LocalPages:
         page=PAGE_HTML
         for key,value in {'SITE_NAME':site,'PAGE_TAG':tag,'PAGE_TITLE':title,'PAGE_BODY':body,
                           'PAGE_ACTION':action,'ACCENT':accent,'NONCE':self.token,
-                          'STATE_URL':json.dumps('/'+self.token+'/state')}.items():
+                          'STATE_URL':json.dumps('/'+self.token+'/state'),
+                          'ACTION_URL':json.dumps('/'+self.token+'/action/'+str(index))}.items():
             page=page.replace(key,value)
         return page
 
     def url(self,index):
         return f'http://127.0.0.1:{self.server.server_port}/{self.token}/tab/{index}'
+
+    def action_url(self,index):
+        return f'http://127.0.0.1:{self.server.server_port}/{self.token}/action/{index}'
+
+    def drain_actions(self,limit=4):
+        actions=[]
+        for _ in range(limit):
+            try:
+                actions.append(self.actions.get_nowait())
+            except queue.Empty:
+                break
+        return actions
 
     def close(self):
         self.server.shutdown(); self.server.server_close(); self.thread.join(timeout=1)
@@ -674,6 +715,9 @@ class NativeSession:
                 self.job.hide(); self.last_visibility=now
             elif not paused:
                 self.job.restore()
+
+    def drain_page_actions(self):
+        return self.pages.drain_actions() if self.pages else []
 
     def reveal_files(self):
         if sys.platform!='win32':
@@ -1125,6 +1169,9 @@ class Classroom:
             self.advance(dt)
             if self.session:
                 self.session.update(self.clock,self.paused,self.hide_on_pause.get())
+                if self.running and not self.paused:
+                    for page_index in self.session.drain_page_actions():
+                        self.handle_page_action(page_index)
             self.update_status()
         except Exception as exc:
             # If an effect fails, recover the controller instead of leaving overlays behind.
@@ -1172,6 +1219,11 @@ class Classroom:
                 self.native_count+=1
         elif self.native_kind=='files':
             self.session.lock_files(max(0,int((elapsed-4)/3)))
+
+    def handle_page_action(self,index):
+        scene=PAGE_ACTION_SCENES[index%len(PAGE_ACTION_SCENES)]
+        LOG.info('Browser action tab=%s scene=%s', index, scene)
+        self.spawn(scene)
 
     def effect(self, title, width, height, **kwargs):
         self.effects[:] = [e for e in self.effects if not e.closed]
@@ -1235,7 +1287,7 @@ class Classroom:
         self.stage_mode('debrief')
 
     def scene_installer(self):
-        e = self.effect('SuperMod Setup', 530, 300, position='center')
+        e = self.effect('SuperMod Setup', 570, 370, position='center')
         label(e.win, 'SuperMod', 25, '#2164a4', bold=True).pack(anchor='w', padx=27, pady=(22, 4))
         label(e.win, 'Installing required components…', 12).pack(anchor='w', padx=28, pady=7)
         label(e.win, 'Please wait while Setup installs SuperMod on your computer.', 10).pack(anchor='w', padx=28, pady=9)
@@ -1243,12 +1295,33 @@ class Classroom:
         bar.pack(fill='x', padx=28, pady=12)
         detail = label(e.win, 'Extracting package…', 10, '#666666')
         detail.pack(anchor='w', padx=28)
-        ttk.Button(e.win, text='Cancel', command=e.close).pack(anchor='e', padx=28, pady=13)
+        percent = label(e.win, '0%', 10, '#666666')
+        percent.pack(anchor='e', padx=28, pady=(0, 4))
+        controls = tk.Frame(e.win, bg='#f3f3f3')
+        controls.pack(fill='x', padx=28, pady=(8, 20))
+        close_button = ttk.Button(controls, text='Cancel', command=e.close)
+        close_button.pack(side='right', ipadx=12)
+        state = {'complete': False}
         def update(t):
-            bar['value'] = min(97, t*10)
-            detail.configure(text='Waiting for background service…' if t > 7 else 'Extracting package…')
+            progress = min(100, int(t/12*100))
+            bar['value'] = progress
+            percent.configure(text=f'{progress}%')
+            if t < 3:
+                text = 'Extracting package…'
+            elif t < 7:
+                text = 'Copying components…'
+            elif t < 10:
+                text = 'Registering browser helper…'
+            elif progress < 100:
+                text = 'Finishing installation…'
+            else:
+                text = 'Installation complete.'
+                if not state['complete']:
+                    state['complete'] = True
+                    close_button.configure(text='Close')
+            detail.configure(text=text)
         e.update_view = update
-        e.limit = 24
+        e.limit = 15
 
     def scene_notification(self):
         e = self.effect('Известие', 420, 180, bg='#242424', position='toast')
