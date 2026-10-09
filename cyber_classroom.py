@@ -577,7 +577,10 @@ class LocalPages:
                 self.end_headers()
                 try:
                     self.wfile.write(payload)
-                except (BrokenPipeError,ConnectionResetError):
+                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                    # Chromium can cancel an in-flight poll while its owned job is
+                    # closing.  On Windows that is commonly WSAECONNABORTED and is
+                    # an expected disconnect, not an application error.
                     pass
         self.server=ThreadingHTTPServer(('127.0.0.1',0),Handler)
         self.thread=threading.Thread(target=lambda:self.server.serve_forever(poll_interval=.1),daemon=True)
@@ -608,15 +611,21 @@ class NativeSession:
         self.root=Path(tempfile.mkdtemp(prefix='CyberClassroom-LAB-'))
         self.profile=self.root/'browser-profile'
         self.folder=self.root/'Учебни файлове'
-        self.folder.mkdir()
         self.files=[]
-        for i,title in enumerate(['Доклад_история','Проект_клуб','Бележки','Задачи',
-                                  'Списък_материали','График','План_урок','Резервно_копие']):
-            path=self.folder/(title+'.txt')
-            content=(f'УЧЕБЕН ФАЙЛ {i+1}\nСъздаден специално за демонстрацията.\n'
-                     'Този текст не съдържа лични данни.\n').encode('utf-8')
-            path.write_bytes(content)
-            self.files.append((path,path.with_name(path.name+'.locked'),content))
+        try:
+            self.folder.mkdir()
+            for i,title in enumerate(['Доклад_история','Проект_клуб','Бележки','Задачи',
+                                      'Списък_материали','График','План_урок','Резервно_копие']):
+                path=self.folder/(title+'.txt')
+                content=(f'УЧЕБЕН ФАЙЛ {i+1}\nСъздаден специално за демонстрацията.\n'
+                         'Този текст не съдържа лични данни.\n').encode('utf-8')
+                path.write_bytes(content)
+                self.files.append((path,path.with_name(path.name+'.locked'),content))
+        except Exception:
+            # A half-created lab must not be abandoned when a full disk or an
+            # endpoint-protection rule rejects one of the generated files.
+            shutil.rmtree(self.root, ignore_errors=True)
+            raise
         self.pages=None
         self.job=None
         self.tabs=0
@@ -678,17 +687,22 @@ class NativeSession:
                     plain.rename(locked)
 
     def restore_files(self):
-        remaining=[]
+        issues=[]
         for plain,locked,content in self.files:
             try:
                 if locked.is_file() and not locked.is_symlink() and not plain.exists():
                     if locked.read_bytes()==content:
                         locked.rename(plain)
                 if locked.exists():
-                    remaining.append(locked.name)
+                    issues.append(locked.name)
+                elif (not plain.is_file() or plain.is_symlink() or
+                      plain.read_bytes()!=content):
+                    # Never overwrite a changed file or follow a replacement
+                    # symlink.  Report the item instead so the teacher can inspect it.
+                    issues.append(plain.name)
             except OSError:
-                remaining.append(locked.name)
-        return remaining
+                issues.append(locked.name if locked.exists() else plain.name)
+        return issues
 
     def close_browser(self):
         job, self.job = self.job, None
@@ -704,18 +718,29 @@ class NativeSession:
         if self.closed:
             return
         self.closed=True
-        browser_error = ''
+        notices=[]
+        browser_closed=True
         try:
             self.close_browser()
         except Exception:
             LOG.exception('Closing the lesson browser failed')
-            browser_error = 'Учебният браузър може да е останал отворен; затворете го с неговия X. '
-        remaining=self.restore_files()
-        self.cleanup_notice=browser_error+('Някои учебни имена не са възстановени; вижте учебната папка.' if remaining else '')
+            browser_closed=False
+            notices.append('Учебният браузър може да е останал отворен; затворете го с неговия X.')
+        issues=self.restore_files()
+        if issues:
+            LOG.warning('Lesson files need inspection: %s', ', '.join(issues))
+            notices.append('Някои учебни файлове са преместени, променени или имат конфликт; '
+                           'вижте учебната папка.')
         # Only our generated browser profile is removed. The visible lesson folder
         # is kept for inspection, including any files a user might have added.
-        if not browser_error and self.profile.is_dir() and not self.profile.is_symlink():
-            shutil.rmtree(self.profile,ignore_errors=True)
+        if browser_closed and self.profile.is_dir() and not self.profile.is_symlink():
+            try:
+                shutil.rmtree(self.profile)
+            except OSError:
+                LOG.exception('Removing the temporary browser profile failed: %s', self.profile)
+                notices.append('Временният браузърен профил не можа да бъде изтрит; '
+                               'пътят е записан в журнала.')
+        self.cleanup_notice=' '.join(notices)
 
 
 class Classroom:
@@ -1757,16 +1782,23 @@ class DesktopOverlay:
     def render(self):
         started = time.monotonic()
         frame = self.frames.frame(self.elapsed, self.app.visual_mode.get())
-        size = (self.canvas.winfo_width(), self.canvas.winfo_height())
-        if min(size) < 10:
-            if self.app.fullscreen.get():
-                size = (self.win.winfo_screenwidth(), self.win.winfo_screenheight())
-            else:
-                size = (min(1400,self.win.winfo_screenwidth()-60),
-                        min(850,self.win.winfo_screenheight()-90))
-        if frame.size != size:
-            frame = frame.resize(size, Image.Resampling.BILINEAR)
-        self.photo = ImageTk.PhotoImage(frame, master=self.win)
+        try:
+            size = (self.canvas.winfo_width(), self.canvas.winfo_height())
+            if min(size) < 10:
+                if self.app.fullscreen.get():
+                    size = (self.win.winfo_screenwidth(), self.win.winfo_screenheight())
+                else:
+                    size = (min(1400,self.win.winfo_screenwidth()-60),
+                            min(850,self.win.winfo_screenheight()-90))
+            if frame.size != size:
+                resized = frame.resize(size, Image.Resampling.BILINEAR)
+                frame.close()
+                frame = resized
+            self.photo = ImageTk.PhotoImage(frame, master=self.win)
+        finally:
+            # PhotoImage has copied the pixels into Tcl; release the per-frame PIL
+            # buffer immediately instead of waiting for garbage collection.
+            frame.close()
         if self.image_item is None:
             self.image_item = self.canvas.create_image(0, 0, anchor='nw', image=self.photo)
             self.badge = self.canvas.create_text(14, 14, anchor='nw',
