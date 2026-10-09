@@ -1,5 +1,9 @@
 import json
+import queue
+import random
 import shutil
+import sys
+import threading
 import unittest
 import urllib.error
 import urllib.request
@@ -86,6 +90,45 @@ class BrowserActionDispatchTests(unittest.TestCase):
             classroom.Classroom.handle_page_action(fake, index)
 
         self.assertEqual(fake.scenes, list(classroom.PAGE_ACTION_SCENES))
+
+
+@unittest.skipUnless(sys.platform == 'win32', 'Native windows require Win32')
+class NativeEffectTests(unittest.TestCase):
+    def test_native_controls_and_button_callback_have_a_bounded_lifecycle(self):
+        class FakeApp:
+            clock = 0.0
+            rng = random.Random(1)
+            events = queue.Queue()
+
+        clicked = []
+        app = FakeApp()
+        effect = classroom.NativeEffect(app, 'Native test', 420, 220, position='center')
+        original_handle = effect.hwnd
+        try:
+            self.assertNotEqual(effect.thread.ident, threading.get_ident())
+            self.assertTrue(effect.thread.is_alive())
+            label_handle = effect.add_label('Учебен прозорец', 20, 20, 360, 30, bold=True)
+            progress_handle = effect.add_progress(20, 65, 360, 20)
+            button_handle = effect.add_button('Close', 280, 120, 100, 34,
+                                              lambda: clicked.append(True))
+            effect.set_text(label_handle, 'Native Win32 контрол')
+            effect.set_progress(progress_handle, 67)
+            effect.user32.SendMessageW(button_handle, effect.BM_CLICK, 0, 0)
+            self.assertEqual(clicked, [])
+            action, callback = app.events.get(timeout=2)
+            self.assertEqual(action, 'native_callback')
+            callback()
+
+            self.assertEqual(clicked, [True])
+            self.assertTrue(effect.user32.IsWindow(original_handle))
+        finally:
+            effect.close()
+
+        self.assertTrue(effect.closed)
+        self.assertIsNone(effect.hwnd)
+        self.assertFalse(effect.thread.is_alive())
+        self.assertNotIn(effect._key(original_handle), effect.registry)
+        self.assertFalse(hasattr(classroom.Classroom, 'open_quiz'))
 
 
 @unittest.skipIf(classroom.Image is None, 'Pillow is not installed')

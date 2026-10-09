@@ -1,6 +1,7 @@
-"""Дигитални детективи 5.0 — демонстрация върху истинския Windows.
+"""Дигитални детективи 6.0 — демонстрация върху истинския Windows.
 
-Windows 10/11 + Python 3.10+ с tkinter. Стартиране: py cyber_classroom.py
+Windows 10/11 + Python 3.10+ с Win32 API, tkinter и Pillow.
+Стартиране: py cyber_classroom.py
 Преди първо стартиране: py -m pip install pillow
 Не са нужни администраторски права.
 Ctrl+Alt+P: глобална пауза / продължаване.
@@ -73,7 +74,7 @@ def configure_logging():
     handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(message)s'))
     LOG.addHandler(handler)
     LOG.setLevel(logging.INFO)
-    LOG.info('Version 5.0; Python %s; platform %s; Pillow available=%s',
+    LOG.info('Version 6.0; Python %s; platform %s; Pillow available=%s',
              sys.version.split()[0], sys.platform, Image is not None)
 
 
@@ -226,96 +227,471 @@ SOURCE_NOTES = {
 }
 
 
-QUESTIONS = [
-    ('01 / Следата в браузъра',
-     'Сайт: minecraft-bonus.example\n„Безплатен мод! Изключи защитата, за да го инсталираш.“\nИзтеглен файл: SuperMod_Setup.exe',
-     ['Изпълнявам файла — пише, че е безплатен.',
-      'Спирам: искането да изключа защитата е тревожен знак.',
-      'Вярвам му, защото страницата има красиво лого.'], 1,
-     'Искането за изключване на защитата е сериозен предупредителен знак.\nКрасивият дизайн и думата „безплатно“ не доказват надеждност.'),
-    ('02 / Следата в пощата',
-     'От: support@school-check.example\n„Профилът ти ще бъде изтрит след 10 минути!\nПотвърди паролата си през този линк.“',
-     ['Проверявам съобщението през познат канал с училището.',
-      'Изпращам паролата си в отговор.',
-      'Отварям линка, защото времето изтича.'], 0,
-     'Спешността и заплахата за загуба на профила подтикват към прибързано действие.\nОтвори познатия официален адрес самостоятелно; не давай паролата си по имейл.'),
-    ('03 / Компютърът показва признаци на заразяване',
-     'Появяват се непознати прозорци и файловете уж се заключват.\nНамираш се в училищна компютърна зала. Как реагираш?',
-     ['Инсталирам „чистачката“, предложена в рекламата.',
-      'Продължавам да работя и се надявам да отмине.',
-      'Прекъсвам Wi-Fi/кабела и уведомявам учителя или администратора.'], 2,
-     'Изолирането от мрежата може да ограничи разпространението, но не премахва заразата.\nУведоми отговорния човек и следвай процедурата на училището.'),
-    ('04 / Обещанието за спасение',
-     'На екрана се иска откуп срещу обещание за връщане на файловете.\nКое твърдение е вярно?',
-     ['Плащането гарантира възстановяване.',
-      'Няма гаранция; търсим компетентна помощ и проверени резервни копия.',
-      'Преименуването на файловете винаги ги възстановява.'], 1,
-     'Обещанието на нападателя не е гаранция. Възстановяването зависи от случая.\nРезервните копия трябва да са проверени и защитени от същия инцидент.'),
-    ('05 / Какво доказаха ефектите?',
-     'Видяхме реклами, терминал и син екран.\nДоказва ли всеки такъв екран наличието на вирус?',
-     ['Да — всеки син екран означава вирус.',
-      'Да — всеки терминал означава хакер.',
-      'Не — нужни са проверка и контекст, а тук всичко беше симулация.'], 2,
-     'Син екран може да е причинен и от драйвер или хардуер. Терминалът е нормален инструмент.\nСимптомът е повод за проверка, а не самостоятелно доказателство за зараза.'),
-    ('06 / Невидимото наблюдение',
-     'При сцената за Pegasus телефонът изглеждаше нормално.\nКаква е основната разлика спрямо искането за откуп?',
-     ['Шпионският софтуер се стреми да събира данни незабелязано.',
-      'Pegasus винаги се показва като прозорец с обратно броене.',
-      'Ако няма реклами, устройството със сигурност е защитено.'], 0,
-     'Pegasus е мобилен шпионски софтуер. Скритото наблюдение се различава от видимото искане за откуп.\nПоказаният екран беше условен учебен модел, а не действителен интерфейс на Pegasus.'),
-    ('07 / Какво беше истинско?',
-     'Видяхме браузърни раздели и файлове с променени имена.\nКакво действително направи тази програма?',
-     ['Прочете личните ми файлове и записа камерата.',
-      'Шифрова документите ми, но после ги възстанови.',
-      'Отвори локални страници в истински браузър и преименува само създадените учебни файлове.'], 2,
-     'Браузърът и учебната папка са истински. Съдържанието е специално създадено за този урок.\nЛичните файлове, камерата и микрофонът не се използват. Няма шифроване.'),
-]
+class NativeWindowClass(ctypes.Structure):
+    _fields_ = [('style',wintypes.UINT),('wndproc',ctypes.c_void_p),
+                ('class_extra',ctypes.c_int),('window_extra',ctypes.c_int),
+                ('instance',wintypes.HINSTANCE),('icon',wintypes.HICON),
+                ('cursor',wintypes.HANDLE),('background',wintypes.HBRUSH),
+                ('menu_name',wintypes.LPCWSTR),('class_name',wintypes.LPCWSTR)]
 
 
-class Effect:
-    def __init__(self, app, title, width, height, bg='#f3f3f3', position='random'):
-        self.app = app
-        self.born = app.clock
-        self.closed = False
-        self.update_view = lambda elapsed: None
-        self.limit = None
-        self.win = tk.Toplevel(app.root)
-        self.win.withdraw()
-        self.win.title(title)
-        self.win.configure(bg=bg)
-        sw, sh = self.win.winfo_screenwidth(), self.win.winfo_screenheight()
-        # Keep the full window within the primary screen, including decorations.
-        width, height = min(width, sw-50), min(height, sh-100)
-        if position == 'center':
-            x, y = (sw-width)//2, max(15, (sh-height)//2-35)
-        elif position == 'toast':
-            x, y = sw-width-22, max(20, sh-height-85)
+class InitCommonControls(ctypes.Structure):
+    _fields_ = [('size',wintypes.DWORD),('classes',wintypes.DWORD)]
+
+
+class NativeEffect:
+    """A real Win32 top-level window with standard Windows child controls.
+
+    Every window owns a dedicated Win32 message-loop thread.  Python 3.13 cannot
+    safely enter a ctypes WNDPROC from inside Tk's GIL-releasing mainloop on the
+    same thread, so button actions cross back through Classroom.events instead.
+    """
+    CLASS_NAME='CyberClassroomNativeEffectV2'
+    registry={}
+    registered=False
+    wndproc_callback=None
+    user32=None
+    gdi32=None
+    kernel32=None
+    comctl32=None
+
+    WM_CLOSE=0x0010
+    WM_COMMAND=0x0111
+    WM_ERASEBKGND=0x0014
+    WM_SETFONT=0x0030
+    WM_NCDESTROY=0x0082
+    WM_CTLCOLOREDIT=0x0133
+    WM_CTLCOLORSTATIC=0x0138
+    WM_SETICON=0x0080
+    WM_USER=0x0400
+    WM_APP_COMMAND=0x8001
+    PBM_SETPOS=WM_USER+2
+    PBM_SETRANGE32=WM_USER+6
+    EM_SETSEL=0x00B1
+    EM_SCROLLCARET=0x00B7
+    BM_CLICK=0x00F5
+
+    WS_CHILD=0x40000000
+    WS_VISIBLE=0x10000000
+    WS_VSCROLL=0x00200000
+    WS_BORDER=0x00800000
+    WS_CAPTION=0x00C00000
+    WS_SYSMENU=0x00080000
+    WS_MINIMIZEBOX=0x00020000
+    WS_EX_TOPMOST=0x00000008
+    WS_EX_APPWINDOW=0x00040000
+    ES_MULTILINE=0x0004
+    ES_AUTOVSCROLL=0x0040
+    ES_READONLY=0x0800
+    SS_NOPREFIX=0x0080
+
+    @classmethod
+    def _key(cls,handle):
+        return int(handle or 0)
+
+    @classmethod
+    def ensure_registered(cls):
+        if cls.registered:
+            return
+        if sys.platform!='win32':
+            raise RuntimeError('Native Win32 прозорците изискват Windows 10/11.')
+        cls.user32=ctypes.WinDLL('user32',use_last_error=True)
+        cls.gdi32=ctypes.WinDLL('gdi32',use_last_error=True)
+        cls.kernel32=ctypes.WinDLL('kernel32',use_last_error=True)
+        cls.comctl32=ctypes.WinDLL('comctl32',use_last_error=True)
+        u,g,k,c=cls.user32,cls.gdi32,cls.kernel32,cls.comctl32
+        callback_type=ctypes.WINFUNCTYPE(ctypes.c_ssize_t,wintypes.HWND,wintypes.UINT,
+                                         wintypes.WPARAM,wintypes.LPARAM)
+
+        def dispatch(hwnd,message,wparam,lparam):
+            effect=cls.registry.get(cls._key(hwnd))
+            if effect is not None:
+                try:
+                    handled,result=effect.handle_message(message,wparam,lparam)
+                    if handled:
+                        return result
+                except Exception as exc:
+                    LOG.exception('Native window callback failed')
+                    if hasattr(effect.app,'events'):
+                        effect.app.events.put(('effect_error',exc))
+            return u.DefWindowProcW(hwnd,message,wparam,lparam)
+
+        cls.wndproc_callback=callback_type(dispatch)
+        signatures={
+            'RegisterClassW':([ctypes.POINTER(NativeWindowClass)],wintypes.ATOM),
+            'CreateWindowExW':([wintypes.DWORD,wintypes.LPCWSTR,wintypes.LPCWSTR,wintypes.DWORD,
+                                ctypes.c_int,ctypes.c_int,ctypes.c_int,ctypes.c_int,wintypes.HWND,
+                                wintypes.HMENU,wintypes.HINSTANCE,ctypes.c_void_p],wintypes.HWND),
+            'DefWindowProcW':([wintypes.HWND,wintypes.UINT,wintypes.WPARAM,wintypes.LPARAM],ctypes.c_ssize_t),
+            'DestroyWindow':([wintypes.HWND],wintypes.BOOL),
+            'IsWindow':([wintypes.HWND],wintypes.BOOL),
+            'ShowWindow':([wintypes.HWND,ctypes.c_int],wintypes.BOOL),
+            'SetWindowTextW':([wintypes.HWND,wintypes.LPCWSTR],wintypes.BOOL),
+            'SendMessageW':([wintypes.HWND,wintypes.UINT,wintypes.WPARAM,wintypes.LPARAM],ctypes.c_ssize_t),
+            'PostMessageW':([wintypes.HWND,wintypes.UINT,wintypes.WPARAM,wintypes.LPARAM],wintypes.BOOL),
+            'SetWindowPos':([wintypes.HWND,wintypes.HWND,ctypes.c_int,ctypes.c_int,
+                             ctypes.c_int,ctypes.c_int,wintypes.UINT],wintypes.BOOL),
+            'GetSystemMetrics':([ctypes.c_int],ctypes.c_int),
+            'AdjustWindowRectEx':([ctypes.POINTER(wintypes.RECT),wintypes.DWORD,wintypes.BOOL,
+                                   wintypes.DWORD],wintypes.BOOL),
+            'GetClientRect':([wintypes.HWND,ctypes.POINTER(wintypes.RECT)],wintypes.BOOL),
+            'FillRect':([wintypes.HDC,ctypes.POINTER(wintypes.RECT),wintypes.HBRUSH],ctypes.c_int),
+            'LoadIconW':([wintypes.HINSTANCE,ctypes.c_void_p],wintypes.HICON),
+            'LoadCursorW':([wintypes.HINSTANCE,ctypes.c_void_p],wintypes.HANDLE),
+            'GetMessageW':([ctypes.POINTER(wintypes.MSG),wintypes.HWND,wintypes.UINT,wintypes.UINT],ctypes.c_int),
+            'TranslateMessage':([ctypes.POINTER(wintypes.MSG)],wintypes.BOOL),
+            'DispatchMessageW':([ctypes.POINTER(wintypes.MSG)],ctypes.c_ssize_t),
+            'PostQuitMessage':([ctypes.c_int],None),
+        }
+        for name,(args,result) in signatures.items():
+            fn=getattr(u,name); fn.argtypes=args; fn.restype=result
+        if hasattr(u,'GetDpiForSystem'):
+            u.GetDpiForSystem.argtypes=[]; u.GetDpiForSystem.restype=wintypes.UINT
+        k.GetModuleHandleW.argtypes=[wintypes.LPCWSTR]; k.GetModuleHandleW.restype=wintypes.HMODULE
+        g.CreateSolidBrush.argtypes=[wintypes.COLORREF]; g.CreateSolidBrush.restype=wintypes.HBRUSH
+        g.DeleteObject.argtypes=[wintypes.HGDIOBJ]; g.DeleteObject.restype=wintypes.BOOL
+        g.SetTextColor.argtypes=[wintypes.HDC,wintypes.COLORREF]; g.SetTextColor.restype=wintypes.COLORREF
+        g.SetBkColor.argtypes=[wintypes.HDC,wintypes.COLORREF]; g.SetBkColor.restype=wintypes.COLORREF
+        g.SetBkMode.argtypes=[wintypes.HDC,ctypes.c_int]; g.SetBkMode.restype=ctypes.c_int
+        g.CreateFontW.argtypes=[ctypes.c_int,ctypes.c_int,ctypes.c_int,ctypes.c_int,ctypes.c_int,
+                                wintypes.DWORD,wintypes.DWORD,wintypes.DWORD,wintypes.DWORD,
+                                wintypes.DWORD,wintypes.DWORD,wintypes.DWORD,wintypes.DWORD,
+                                wintypes.LPCWSTR]
+        g.CreateFontW.restype=wintypes.HFONT
+        controls=InitCommonControls(ctypes.sizeof(InitCommonControls),0x00000020)
+        c.InitCommonControlsEx.argtypes=[ctypes.POINTER(InitCommonControls)]
+        c.InitCommonControlsEx.restype=wintypes.BOOL
+        c.InitCommonControlsEx(ctypes.byref(controls))
+        instance=k.GetModuleHandleW(None)
+        window_class=NativeWindowClass()
+        window_class.wndproc=ctypes.cast(cls.wndproc_callback,ctypes.c_void_p).value
+        window_class.instance=instance
+        window_class.icon=u.LoadIconW(None,ctypes.c_void_p(32512))
+        window_class.cursor=u.LoadCursorW(None,ctypes.c_void_p(32512))
+        window_class.background=ctypes.c_void_p(6)  # COLOR_WINDOW + 1
+        window_class.class_name=cls.CLASS_NAME
+        if not u.RegisterClassW(ctypes.byref(window_class)):
+            error=ctypes.get_last_error()
+            if error!=1410:  # ERROR_CLASS_ALREADY_EXISTS
+                raise ctypes.WinError(error)
+        cls.registered=True
+
+    @staticmethod
+    def color(value):
+        value=value.lstrip('#')
+        red,green,blue=(int(value[i:i+2],16) for i in (0,2,4))
+        return red|(green<<8)|(blue<<16)
+
+    def __init__(self,app,title,width,height,bg='#f3f3f3',position='random'):
+        self.ensure_registered()
+        self.app=app
+        self.born=app.clock
+        self.closed=False
+        self.closing=False
+        self.update_view=lambda elapsed: None
+        self.limit=None
+        self.callbacks={}
+        self.next_control_id=100
+        self.fonts={}
+        self.brushes={}
+        self.control_colors={}
+        self.background=self.color(bg)
+        self.background_brush=None
+        self.hwnd=None
+        self.commands=queue.Queue()
+        self.ready=threading.Event()
+        self.init_error=None
+        self.creation=(title,width,height,position)
+        self.thread=threading.Thread(target=self._thread_main,
+            name='NativeEffect-'+secrets.token_hex(3),daemon=True)
+        self.thread.start()
+        if not self.ready.wait(timeout=5):
+            self.closing=True
+            raise RuntimeError('Native Win32 прозорецът не отговори при стартиране.')
+        if self.init_error is not None:
+            raise self.init_error
+
+    def _thread_main(self):
+        try:
+            self._create_window(*self.creation)
+        except Exception as exc:
+            self.init_error=exc
+            self.closed=True
+            self._release_resources()
+            self.ready.set()
+            return
+        self.ready.set()
+        msg=wintypes.MSG()
+        try:
+            while True:
+                result=self.user32.GetMessageW(ctypes.byref(msg),None,0,0)
+                if result<=0:
+                    if result<0:
+                        error=ctypes.WinError(ctypes.get_last_error())
+                        LOG.error('Native Win32 message loop failed',exc_info=(type(error),error,error.__traceback__))
+                    break
+                self.user32.TranslateMessage(ctypes.byref(msg))
+                self.user32.DispatchMessageW(ctypes.byref(msg))
+        finally:
+            hwnd=self.hwnd
+            if hwnd and self.user32.IsWindow(hwnd):
+                self.user32.DestroyWindow(hwnd)
+            self.registry.pop(self._key(hwnd),None)
+            self.hwnd=None
+            self.closed=True
+            self.closing=True
+            self._release_resources()
+
+    def _create_window(self,title,width,height,position):
+        self.background_brush=self.gdi32.CreateSolidBrush(self.background)
+        if not self.background_brush:
+            raise ctypes.WinError(ctypes.get_last_error())
+        sw,sh=self.user32.GetSystemMetrics(0),self.user32.GetSystemMetrics(1)
+        self.dpi=self.user32.GetDpiForSystem() if hasattr(self.user32,'GetDpiForSystem') else 96
+        desired_scale=max(1.0,self.dpi/96)
+        self.scale=min(desired_scale,(sw-80)/width,(sh-120)/height)
+        self.width=round(width*self.scale)
+        self.height=round(height*self.scale)
+        style=self.WS_CAPTION|self.WS_SYSMENU|self.WS_MINIMIZEBOX
+        exstyle=self.WS_EX_TOPMOST|self.WS_EX_APPWINDOW
+        rect=wintypes.RECT(0,0,self.width,self.height)
+        if not self.user32.AdjustWindowRectEx(ctypes.byref(rect),style,False,exstyle):
+            self._release_resources()
+            raise ctypes.WinError(ctypes.get_last_error())
+        outer_width,outer_height=rect.right-rect.left,rect.bottom-rect.top
+        if position=='center':
+            x,y=(sw-outer_width)//2,max(15,(sh-outer_height)//2)
+        elif position=='toast':
+            x,y=sw-outer_width-22,max(20,sh-outer_height-85)
         else:
-            x = app.rng.randint(20, max(20, sw-width-30))
-            y = app.rng.randint(25, max(25, sh-height-90))
-        self.win.geometry(f'{width}x{height}+{x}+{y}')
-        self.win.resizable(False, False)
-        self.win.protocol('WM_DELETE_WINDOW', self.close)
-        self.win.attributes('-topmost', True)
-        self.win.deiconify()
+            x=self.app.rng.randint(20,max(20,sw-outer_width-30))
+            y=self.app.rng.randint(25,max(25,sh-outer_height-90))
+        instance=self.kernel32.GetModuleHandleW(None)
+        self.hwnd=self.user32.CreateWindowExW(exstyle,self.CLASS_NAME,title,style,x,y,
+            outer_width,outer_height,None,None,instance,None)
+        if not self.hwnd:
+            self._release_resources()
+            raise ctypes.WinError(ctypes.get_last_error())
+        self.registry[self._key(self.hwnd)]=self
+
+    def _invoke(self,action,timeout=5):
+        if threading.current_thread() is self.thread:
+            return action()
+        if self.closed or self.closing or not self.hwnd:
+            raise RuntimeError('Native Win32 прозорецът вече е затворен.')
+        completed=threading.Event()
+        result={}
+        self.commands.put((action,completed,result))
+        if not self.user32.PostMessageW(self.hwnd,self.WM_APP_COMMAND,0,0):
+            raise ctypes.WinError(ctypes.get_last_error())
+        if not completed.wait(timeout):
+            raise RuntimeError('Native Win32 прозорецът не отговори навреме.')
+        if 'error' in result:
+            raise result['error']
+        return result.get('value')
+
+    def _run_commands(self):
+        while True:
+            try:
+                action,completed,result=self.commands.get_nowait()
+            except queue.Empty:
+                return
+            try:
+                result['value']=action()
+            except Exception as exc:
+                result['error']=exc
+            finally:
+                completed.set()
+
+    def _release_resources(self):
+        self.callbacks.clear()
+        self.control_colors.clear()
+        for font in self.fonts.values():
+            self.gdi32.DeleteObject(font)
+        self.fonts.clear()
+        for brush in self.brushes.values():
+            self.gdi32.DeleteObject(brush)
+        self.brushes.clear()
+        if getattr(self,'background_brush',None):
+            self.gdi32.DeleteObject(self.background_brush)
+            self.background_brush=None
+
+    def _font(self,size=11,bold=False,face='Segoe UI'):
+        key=(size,bold,face)
+        if key not in self.fonts:
+            height=-max(8,round(size*96*self.scale/72))
+            font=self.gdi32.CreateFontW(height,0,0,0,700 if bold else 400,0,0,0,1,
+                                        0,0,5,0,face)
+            if not font:
+                raise ctypes.WinError(ctypes.get_last_error())
+            self.fonts[key]=font
+        return self.fonts[key]
+
+    def _child(self,class_name,text,style,x,y,width,height,control_id=0,
+               size=11,bold=False,face='Segoe UI'):
+        instance=self.kernel32.GetModuleHandleW(None)
+        x,y,width,height=(round(value*self.scale) for value in (x,y,width,height))
+        handle=self.user32.CreateWindowExW(0,class_name,text,self.WS_CHILD|self.WS_VISIBLE|style,
+            x,y,width,height,self.hwnd,ctypes.c_void_p(control_id) if control_id else None,
+            instance,None)
+        if not handle:
+            raise ctypes.WinError(ctypes.get_last_error())
+        self.user32.SendMessageW(handle,self.WM_SETFONT,self._font(size,bold,face),1)
+        return handle
+
+    def _color_control(self,handle,fg,bg):
+        foreground=self.color(fg)
+        background=self.color(bg)
+        brush=self.brushes.get(background)
+        if brush is None:
+            brush=self.gdi32.CreateSolidBrush(background)
+            if not brush:
+                raise ctypes.WinError(ctypes.get_last_error())
+            self.brushes[background]=brush
+        self.control_colors[self._key(handle)]=(foreground,background,brush)
+
+    def add_label(self,text,x,y,width,height,size=11,bold=False,fg='#202020',bg=None,face='Segoe UI'):
+        return self._invoke(lambda:self._add_label(text,x,y,width,height,size,bold,fg,bg,face))
+
+    def _add_label(self,text,x,y,width,height,size,bold,fg,bg,face):
+        handle=self._child('STATIC',text,self.SS_NOPREFIX,x,y,width,height,size=size,bold=bold,face=face)
+        self._color_control(handle,fg,bg or self._hex_background())
+        return handle
+
+    def add_button(self,text,x,y,width,height,callback,default=False):
+        return self._invoke(lambda:self._add_button(text,x,y,width,height,callback,default))
+
+    def _add_button(self,text,x,y,width,height,callback,default):
+        control_id=self.next_control_id; self.next_control_id+=1
+        handle=self._child('BUTTON',text,1 if default else 0,x,y,width,height,
+                           control_id=control_id,size=10)
+        self.callbacks[control_id]=callback
+        return handle
+
+    def add_progress(self,x,y,width,height):
+        return self._invoke(lambda:self._add_progress(x,y,width,height))
+
+    def _add_progress(self,x,y,width,height):
+        handle=self._child('msctls_progress32','',0,x,y,width,height)
+        self.user32.SendMessageW(handle,self.PBM_SETRANGE32,0,100)
+        return handle
+
+    def add_edit(self,text,x,y,width,height,size=10,fg='#d6d6d6',bg='#0c0c0c'):
+        return self._invoke(lambda:self._add_edit(text,x,y,width,height,size,fg,bg))
+
+    def _add_edit(self,text,x,y,width,height,size,fg,bg):
+        style=self.WS_VSCROLL|self.WS_BORDER|self.ES_MULTILINE|self.ES_AUTOVSCROLL|self.ES_READONLY
+        handle=self._child('EDIT',text,style,x,y,width,height,size=size,face='Consolas')
+        self._color_control(handle,fg,bg)
+        return handle
+
+    def _hex_background(self):
+        red=self.background&0xff; green=(self.background>>8)&0xff; blue=(self.background>>16)&0xff
+        return f'#{red:02x}{green:02x}{blue:02x}'
+
+    def set_text(self,handle,text):
+        if handle and self.user32.IsWindow(handle):
+            self.user32.SetWindowTextW(handle,text)
+
+    def set_progress(self,handle,value):
+        if handle and self.user32.IsWindow(handle):
+            self.user32.SendMessageW(handle,self.PBM_SETPOS,max(0,min(100,int(value))),0)
+
+    def append_edit(self,handle,text):
+        self.set_text(handle,text)
+        self.user32.SendMessageW(handle,self.EM_SETSEL,-1,-1)
+        self.user32.SendMessageW(handle,self.EM_SCROLLCARET,0,0)
+
+    def set_icon(self,resource=32515):
+        return self._invoke(lambda:self._set_icon(resource))
+
+    def _set_icon(self,resource):
+        icon=self.user32.LoadIconW(None,ctypes.c_void_p(resource))
+        self.user32.SendMessageW(self.hwnd,self.WM_SETICON,0,icon)
+        self.user32.SendMessageW(self.hwnd,self.WM_SETICON,1,icon)
+
+    def show(self,activate=True):
+        if self.closed or self.closing:
+            return
+        self._invoke(lambda:self._show(activate))
+
+    def _show(self,activate):
+        self.user32.ShowWindow(self.hwnd,5 if activate else 4)
+        self._set_topmost(True,activate)
+
+    def set_topmost(self,enabled,activate=False):
+        if self.closed or self.closing:
+            return
+        self._invoke(lambda:self._set_topmost(enabled,activate))
+
+    def _set_topmost(self,enabled,activate):
+        insert_after=ctypes.c_void_p(-1 if enabled else -2)
+        self.user32.SetWindowPos(self.hwnd,insert_after,0,0,0,0,
+                                 0x0001|0x0002|0x0040|(0 if activate else 0x0010))
+
+    def hide(self):
+        if not self.closed and not self.closing:
+            self._invoke(lambda:self.user32.ShowWindow(self.hwnd,0))
+
+    def handle_message(self,message,wparam,lparam):
+        if message==self.WM_APP_COMMAND:
+            self._run_commands()
+            return True,0
+        if message==self.WM_COMMAND:
+            callback=self.callbacks.get(int(wparam)&0xffff)
+            notification=(int(wparam)>>16)&0xffff
+            if callback is not None and notification==0:  # BN_CLICKED
+                if hasattr(self.app,'events'):
+                    self.app.events.put(('native_callback',callback))
+                return True,0
+        elif message==self.WM_CLOSE:
+            if self.hwnd and self.user32.IsWindow(self.hwnd):
+                self.user32.DestroyWindow(self.hwnd)
+            return True,0
+        elif message==self.WM_ERASEBKGND:
+            rect=wintypes.RECT()
+            self.user32.GetClientRect(self.hwnd,ctypes.byref(rect))
+            self.user32.FillRect(wparam,ctypes.byref(rect),self.background_brush)
+            return True,1
+        elif message in (self.WM_CTLCOLORSTATIC,self.WM_CTLCOLOREDIT):
+            colors=self.control_colors.get(self._key(lparam))
+            if colors:
+                foreground,background,brush=colors
+                self.gdi32.SetTextColor(wparam,foreground)
+                self.gdi32.SetBkColor(wparam,background)
+                self.gdi32.SetBkMode(wparam,1)
+                return True,self._key(brush)
+        elif message==self.WM_NCDESTROY:
+            self.registry.pop(self._key(self.hwnd),None)
+            self.hwnd=None
+            self.closed=True
+            self.closing=True
+            self._release_resources()
+            self.user32.PostQuitMessage(0)
+        return False,0
 
     def tick(self):
         if self.closed:
             return
-        elapsed = self.app.clock-self.born
-        if self.limit is not None and elapsed >= self.limit:
+        elapsed=self.app.clock-self.born
+        if self.limit is not None and elapsed>=self.limit:
             self.close()
         else:
             self.update_view(elapsed)
 
     def close(self):
-        if self.closed:
+        if self.closed or self.closing:
             return
-        self.closed = True
-        try:
-            self.win.destroy()
-        except tk.TclError:
-            pass
+        self.closing=True
+        hwnd=self.hwnd
+        if hwnd and self.user32.IsWindow(hwnd):
+            if not self.user32.PostMessageW(hwnd,self.WM_CLOSE,0,0):
+                error=ctypes.WinError(ctypes.get_last_error())
+                LOG.error('Could not close native effect',exc_info=(type(error),error,error.__traceback__))
+        if threading.current_thread() is not self.thread:
+            self.thread.join(timeout=2)
+            if self.thread.is_alive():
+                LOG.error('Native effect thread did not stop within two seconds')
 
 
 def label(parent, text, size=11, color='#222222', bg=None, bold=False, **kwargs):
@@ -811,8 +1187,6 @@ class Classroom:
         self.event_index = 0
         self.last = time.monotonic()
         self.job = None
-        self.question = 0
-        self.answer = None
         self.rate = 1.0
         self.sound = tk.BooleanVar(value=False)
         self.hide_on_pause = tk.BooleanVar(value=True)
@@ -838,7 +1212,7 @@ class Classroom:
 
     def build_panel(self):
         r = self.root
-        r.title('Дигитални детективи 5.0 — ефекти върху Windows')
+        r.title('Дигитални детективи 6.0 — ефекти върху Windows')
         sw, sh = r.winfo_screenwidth(), r.winfo_screenheight()
         width, height = min(1000, sw-50), min(810, sh-70)
         r.geometry(f'{width}x{height}+{max(15,(sw-width)//2)}+{max(10,(sh-height)//2-20)}')
@@ -847,7 +1221,6 @@ class Classroom:
         if 'clam' in style.theme_names():
             style.theme_use('clam')
         style.configure('TButton', font=('Segoe UI', 10), padding=(10, 7))
-        style.configure('Infect.Horizontal.TProgressbar', background='#c93b4c')
         # Small laptops and Windows text scaling must not clip the controls.
         viewport = tk.Canvas(r, bg='#101b2c', highlightthickness=0)
         scrollbar = ttk.Scrollbar(r, orient='vertical', command=viewport.yview)
@@ -859,7 +1232,7 @@ class Classroom:
         r.bind('<Configure>', lambda e: viewport.configure(scrollregion=viewport.bbox('all')))
         viewport.bind('<Configure>', lambda e: viewport.itemconfigure(panel_item, width=e.width))
         self.root.bind('<MouseWheel>', lambda e: viewport.yview_scroll(-int(e.delta/120), 'units'))
-        label(r, 'ДИГИТАЛНИ ДЕТЕКТИВИ / 5.0', 23, '#e9f1fc', bold=True).pack(anchor='w', padx=25, pady=(15, 4))
+        label(r, 'ДИГИТАЛНИ ДЕТЕКТИВИ / 6.0', 23, '#e9f1fc', bold=True).pack(anchor='w', padx=25, pady=(15, 4))
         label(r, 'Твоят Windows • истински Edge/Chrome • до 20 раздела • учебна папка във File Explorer',
               11, '#9bb2cc').pack(anchor='w', padx=26, pady=(0, 14))
         keys = tk.Frame(r, bg='#1c314b')
@@ -913,8 +1286,7 @@ class Classroom:
         self.resume_button = ttk.Button(controls, text='Продължи', command=self.toggle_pause, state='disabled')
         self.resume_button.pack(side='left')
         ttk.Button(controls, text='Спри / изчисти', command=self.stop).pack(side='left', padx=7)
-        ttk.Button(controls, text='Разследване с класа', command=self.open_quiz).pack(side='left')
-        ttk.Button(controls, text='Следваща глава', command=self.next_chapter).pack(side='left', padx=7)
+        ttk.Button(controls, text='Следваща глава', command=self.next_chapter).pack(side='left')
         ttk.Button(controls, text='Учебна папка', command=self.show_lesson_folder).pack(side='left')
         ttk.Button(controls, text='Изход', command=self.close).pack(side='right')
         label(r, '', 11, '#80e2c4', textvariable=self.status, wraplength=width-55).pack(anchor='w', padx=26, pady=6)
@@ -1049,9 +1421,9 @@ class Classroom:
                     self.stage.win.withdraw()
             for effect in self.effects:
                 if not effect.closed:
-                    effect.win.attributes('-topmost', False)
+                    effect.set_topmost(False)
                     if self.hide_on_pause.get():
-                        effect.win.withdraw()
+                        effect.hide()
             self.resume_button.configure(text='▶ Продължи')
             self.show_panel()
         else:
@@ -1062,9 +1434,7 @@ class Classroom:
                 self.stage.win.lift()
             for effect in self.effects:
                 if not effect.closed:
-                    effect.win.deiconify()
-                    effect.win.attributes('-topmost', True)
-                    effect.win.lift()
+                    effect.show(activate=False)
             self.resume_button.configure(text='Пауза')
         self.update_status()
 
@@ -1164,6 +1534,10 @@ class Classroom:
                     self.hotkeys_ok = False
                     self.stop()
                     self.key_status.set(payload)
+                elif action == 'effect_error':
+                    raise payload
+                elif action == 'native_callback':
+                    payload()
             now = time.monotonic()
             dt, self.last = max(0, now-self.last), now
             self.advance(dt)
@@ -1188,7 +1562,7 @@ class Classroom:
                 _, name = TIMELINE[self.event_index]
                 self.event_index += 1
                 if name == 'finish':
-                    self.stop('Историята приключи. Обсъдете случилото се или отворете разследването.')
+                    self.stop('Историята приключи. Обсъдете видимите признаци и правилната реакция.')
                     return
                 self.spawn(name)
         elif self.clock >= 300:
@@ -1229,7 +1603,7 @@ class Classroom:
         self.effects[:] = [e for e in self.effects if not e.closed]
         while len(self.effects) >= self.MAX_WINDOWS:
             self.effects.pop(0).close()
-        effect = Effect(self, title, width, height, **kwargs)
+        effect = NativeEffect(self, title, width, height, **kwargs)
         self.effects.append(effect)
         return effect
 
@@ -1288,24 +1662,18 @@ class Classroom:
 
     def scene_installer(self):
         e = self.effect('SuperMod Setup', 570, 370, position='center')
-        label(e.win, 'SuperMod', 25, '#2164a4', bold=True).pack(anchor='w', padx=27, pady=(22, 4))
-        label(e.win, 'Installing required components…', 12).pack(anchor='w', padx=28, pady=7)
-        label(e.win, 'Please wait while Setup installs SuperMod on your computer.', 10).pack(anchor='w', padx=28, pady=9)
-        bar = ttk.Progressbar(e.win, maximum=100)
-        bar.pack(fill='x', padx=28, pady=12)
-        detail = label(e.win, 'Extracting package…', 10, '#666666')
-        detail.pack(anchor='w', padx=28)
-        percent = label(e.win, '0%', 10, '#666666')
-        percent.pack(anchor='e', padx=28, pady=(0, 4))
-        controls = tk.Frame(e.win, bg='#f3f3f3')
-        controls.pack(fill='x', padx=28, pady=(8, 20))
-        close_button = ttk.Button(controls, text='Cancel', command=e.close)
-        close_button.pack(side='right', ipadx=12)
+        e.add_label('SuperMod',28,22,510,48,25,True,'#2164a4')
+        e.add_label('Installing required components…',28,83,510,28,12)
+        e.add_label('Please wait while Setup installs SuperMod on your computer.',28,121,510,26,10)
+        bar=e.add_progress(28,169,514,22)
+        detail=e.add_label('Extracting package…',28,211,420,25,10,False,'#666666')
+        percent=e.add_label('0%',470,211,72,25,10,False,'#666666')
+        close_button=e.add_button('Cancel',422,291,120,36,e.close)
         state = {'complete': False}
         def update(t):
             progress = min(100, int(t/12*100))
-            bar['value'] = progress
-            percent.configure(text=f'{progress}%')
+            e.set_progress(bar,progress)
+            e.set_text(percent,f'{progress}%')
             if t < 3:
                 text = 'Extracting package…'
             elif t < 7:
@@ -1318,152 +1686,94 @@ class Classroom:
                 text = 'Installation complete.'
                 if not state['complete']:
                     state['complete'] = True
-                    close_button.configure(text='Close')
-            detail.configure(text=text)
+                    e.set_text(close_button,'Close')
+            e.set_text(detail,text)
         e.update_view = update
         e.limit = 15
+        e.show()
 
     def scene_notification(self):
-        e = self.effect('Известие', 420, 180, bg='#242424', position='toast')
-        label(e.win, '⚠  Защита на устройството', 14, 'white', bold=True).pack(anchor='w', padx=21, pady=(20, 8))
-        label(e.win, 'Открита е подозрителна активност.\nНепознато приложение се изпълнява във фонов режим.',
-              11, '#e2e2e2', wraplength=375).pack(anchor='w', padx=21)
-        ttk.Button(e.win, text='Преглед', command=lambda: [e.close(), self.spawn('warning')]).pack(anchor='e', padx=18, pady=13)
+        e = self.effect('Защита на устройството', 440, 220, bg='#242424', position='toast')
+        e.set_icon(32515)
+        e.add_label('Защита на устройството',22,20,390,30,14,True,'#ffffff','#242424')
+        e.add_label('Открита е подозрителна активност.\nНепознато приложение се изпълнява във фонов режим.',
+                    22,61,390,60,11,False,'#e2e2e2','#242424')
+        e.add_button('Преглед',302,150,110,34,lambda: [e.close(),self.spawn('warning')],True)
         e.limit = 18
+        e.show()
 
     def scene_warning(self):
-        e = self.effect('Security Center — Action required', 550, 330)
-        top = tk.Frame(e.win, bg='#b72935')
-        top.pack(fill='x')
-        label(top, '⚠  Threats detected', 23, 'white', bold=True).pack(anchor='w', padx=23, pady=19)
-        label(e.win, 'Potentially unwanted software detected', 13, bold=True).pack(anchor='w', padx=24, pady=(17, 10))
-        label(e.win, 'Status:   Active\nProcess:  update_helper.exe\nRisk:       High', 11).pack(anchor='w', padx=25)
-        label(e.win, 'Your documents may be at risk.', 11, '#a52531').pack(anchor='w', padx=25, pady=12)
-        row = tk.Frame(e.win, bg='#f3f3f3'); row.pack(fill='x', padx=22, pady=6)
-        ttk.Button(row, text='Scan now', command=lambda: [e.close(), self.spawn('scanner')]).pack(side='left')
-        ttk.Button(row, text='Dismiss', command=e.close).pack(side='right')
+        e = self.effect('Security Center — Action required', 570, 360)
+        e.set_icon(32515)
+        e.add_label('Threats detected',0,0,570,72,23,True,'#ffffff','#b72935')
+        e.add_label('Potentially unwanted software detected',25,92,510,30,13,True)
+        e.add_label('Status:    Active\nProcess:  update_helper.exe\nRisk:       High',25,132,510,72,11)
+        e.add_label('Your documents may be at risk.',25,218,510,28,11,False,'#a52531')
+        e.add_button('Scan now',25,287,120,36,lambda: [e.close(),self.spawn('scanner')],True)
+        e.add_button('Dismiss',425,287,120,36,e.close)
+        e.show()
 
     def scene_advert(self):
-        e = self.effect('Special offer — Browser', 500, 365, bg='white')
-        label(e.win, '  https://bonus-rewards.example/claim', 10, '#555555', bg='#ededed').pack(fill='x', ipady=8)
+        e = self.effect('Special offer — Browser', 520, 390, bg='#ffffff')
+        e.add_label('  https://bonus-rewards.example/claim',0,0,520,42,10,False,'#555555','#ededed')
         title, subtitle = self.rng.choice([
             ('ПОЗДРАВЛЕНИЯ!', 'Избрани сте за специална награда!'),
             ('КОМПЮТЪРЪТ Е БАВЕН?', 'Изтеглете нашия „ускорител“ веднага.'),
             ('БЕЗПЛАТНИ БОНУСИ!', 'Офертата изтича след броени минути.')])
-        label(e.win, title, 25, '#8523ac', bold=True).pack(pady=(26, 11))
-        label(e.win, subtitle, 12, wraplength=445).pack(pady=6)
-        countdown = label(e.win, 'Оставащо време: 01:59', 18, '#c02e42', bold=True)
-        countdown.pack(pady=15)
-        ttk.Button(e.win, text='ВЗЕМИ СЕГА', command=lambda: self.spawn('warning')).pack(ipadx=35, pady=7)
-        ttk.Button(e.win, text='Затвори', command=e.close).pack(pady=5)
+        e.add_label(title,28,74,464,48,25,True,'#8523ac','#ffffff')
+        e.add_label(subtitle,28,137,464,52,12,False,'#202020','#ffffff')
+        countdown=e.add_label('Оставащо време: 01:59',28,210,464,38,18,True,'#c02e42','#ffffff')
+        e.add_button('ВЗЕМИ СЕГА',28,298,180,38,lambda: self.spawn('warning'),True)
+        e.add_button('Затвори',382,298,110,38,e.close)
         def update(t):
-            n = max(0, 119-int(t)); countdown.configure(text=f'Оставащо време: {n//60:02}:{n%60:02}')
+            n=max(0,119-int(t))
+            e.set_text(countdown,f'Оставащо време: {n//60:02}:{n%60:02}')
         e.update_view = update
+        e.show()
 
     def scene_terminal(self):
-        e = self.effect(r'C:\Windows\System32\cmd.exe', 810, 455, bg='#0c0c0c')
-        text = tk.Text(e.win, bg='#0c0c0c', fg='#c6c6c6', insertbackground='white',
-                       font=('Consolas', 11), relief='flat', wrap='word', padx=10, pady=10,
-                       state='disabled', takefocus=False)
-        text.pack(fill='both', expand=True)
+        e = self.effect(r'C:\Windows\System32\cmd.exe', 830, 500, bg='#0c0c0c')
+        text=e.add_edit('',10,10,810,448,11,'#c6c6c6','#0c0c0c')
         state = {'count': -1}
         def update(t):
             count = min(len(TERMINAL_LINES), 1+int(t/1.0))
             if count != state['count']:
-                text.configure(state='normal')
-                text.delete('1.0', 'end')
-                text.insert('end', '\n'.join(TERMINAL_LINES[:count])+'\n_')
-                text.see('end')
-                text.configure(state='disabled')
+                e.append_edit(text,'\r\n'.join(TERMINAL_LINES[:count])+'\r\n_')
                 state['count'] = count
         e.update_view = update
+        e.show()
 
     def scene_scanner(self):
-        e = self.effect('PC Defender — System Scan', 590, 365)
-        label(e.win, 'System scan in progress', 23, '#294867', bold=True).pack(anchor='w', padx=25, pady=(21, 12))
-        stat = label(e.win, '', 12); stat.pack(anchor='w', padx=25, pady=5)
-        bar = ttk.Progressbar(e.win, maximum=100, style='Infect.Horizontal.TProgressbar')
-        bar.pack(fill='x', padx=25, pady=15)
-        result = label(e.win, '', 18, '#b52c3f', bold=True); result.pack(anchor='w', padx=25, pady=7)
-        label(e.win, 'Adware.PopUps\nTrojan.FakeInstaller\nSuspicious.UpdateHelper', 11).pack(anchor='w', padx=25, pady=8)
-        ttk.Button(e.win, text='Close', command=e.close).pack(anchor='e', padx=25, pady=12)
+        e = self.effect('PC Defender — System Scan', 620, 400)
+        e.add_label('System scan in progress',26,22,560,42,23,True,'#294867')
+        stat=e.add_label('Files checked: 0    •    0%',26,82,560,28,12)
+        bar=e.add_progress(26,126,568,22)
+        result=e.add_label('Threats found: 0',26,171,560,36,18,True,'#b52c3f')
+        e.add_label('Adware.PopUps\nTrojan.FakeInstaller\nSuspicious.UpdateHelper',26,222,560,72,11)
+        e.add_button('Close',474,326,120,36,e.close)
         def update(t):
             p = min(1, t/20)
-            bar['value'] = p*100
-            stat.configure(text=f'Files checked: {int(p*18427):,}    •    {int(p*100)}%')
-            result.configure(text=f'Threats found: {min(37, int(t*2))}')
+            e.set_progress(bar,p*100)
+            e.set_text(stat,f'Files checked: {int(p*18427):,}    •    {int(p*100)}%')
+            e.set_text(result,f'Threats found: {min(37, int(t*2))}')
         e.update_view = update
+        e.show()
 
     def scene_error(self):
-        e = self.effect('Application Error', 490, 220)
-        label(e.win, '×', 40, '#b62435', bold=True).pack(side='left', padx=(20, 5))
-        body = tk.Frame(e.win, bg='#f3f3f3'); body.pack(fill='both', expand=True, padx=18, pady=20)
-        label(body, 'update_helper.exe has stopped responding', 12, bold=True,
-              wraplength=365).pack(anchor='w', pady=(7, 12))
-        label(body, 'The operation could not be completed.\nError code: 0x00000005', 10).pack(anchor='w')
-        ttk.Button(body, text='OK', command=e.close).pack(anchor='e', pady=17)
+        e = self.effect('Application Error', 520, 260)
+        e.set_icon(32513)
+        e.add_label('×',24,30,60,60,40,True,'#b62435')
+        e.add_label('update_helper.exe has stopped responding',94,30,398,34,12,True)
+        e.add_label('The operation could not be completed.\nError code: 0x00000005',
+                    94,82,398,58,10)
+        e.add_button('OK',382,184,110,36,e.close,True)
+        e.show()
 
     def scene_ransom(self):
         self.stage_mode('ransom')
 
     def scene_blue(self):
         self.stage_mode('blue')
-
-    def open_quiz(self):
-        self.stop()
-        self.hide_panel()
-        self.mode = 'quiz'
-        self.question = 0
-        self.answer = None
-        e = self.effect('Разследване с класа', 970, 620, bg='#101b2c', position='center')
-        self.quiz_effect = e
-        self.quiz_body = tk.Frame(e.win, bg='#101b2c')
-        self.quiz_body.pack(fill='both', expand=True, padx=28, pady=22)
-        e.win.protocol('WM_DELETE_WINDOW', self.stop)
-        self.draw_quiz()
-
-    def draw_quiz(self):
-        body = self.quiz_body
-        for widget in body.winfo_children():
-            widget.destroy()
-        if self.question >= len(QUESTIONS):
-            label(body, 'Разследването приключи', 27, '#80e2c4', bold=True).pack(anchor='w', pady=10)
-            label(body, 'Спрете. Проверете. Потърсете помощ.', 22, 'white').pack(anchor='w', pady=22)
-            label(body, 'Рекламите, терминалът и синият екран не са сами по себе си доказателство за вирус.\n\n'
-                  'Проверявайте източниците и не изключвайте защитата заради непознати програми.\n\n'
-                  'При инцидент уведомете учителя или администратора.\n\n'
-                  'Защитените и проверени резервни копия са част от подготовката.', 14,
-                  '#d4e1f2', wraplength=870).pack(anchor='w', pady=15)
-            ttk.Button(body, text='Към панела', command=self.stop).pack(anchor='w', pady=20)
-            return
-        title, evidence, options, correct, explanation = QUESTIONS[self.question]
-        label(body, title, 23, '#80e2c4', bold=True).pack(anchor='w', pady=(0, 16))
-        label(body, evidence, 13, '#e9f1fc', wraplength=870).pack(anchor='w', pady=(0, 16))
-        for i, option in enumerate(options):
-            color = '#28425e'
-            if self.answer is not None:
-                if i == correct: color = '#17634e'
-                elif i == self.answer: color = '#79333f'
-            tk.Button(body, text=option, command=lambda n=i: self.choose(n), bg=color, fg='white',
-                      activebackground=color, activeforeground='white', font=('Segoe UI', 11),
-                      relief='flat', anchor='w', wraplength=840, padx=14, pady=10).pack(fill='x', pady=4)
-        if self.answer is not None:
-            label(body, 'Точно така.' if self.answer == correct else 'Нека разгледаме защо.',
-                  15, '#80e2c4', bold=True).pack(anchor='w', pady=(15, 6))
-            label(body, explanation, 11, '#d4e1f2', wraplength=875).pack(anchor='w')
-            ttk.Button(body, text='Следваща улика →', command=self.next_question).pack(anchor='e', pady=15)
-        else:
-            label(body, 'Обсъдете с класа, след което изберете отговор.', 11, '#9bb2cc').pack(anchor='w', pady=16)
-
-    def choose(self, index):
-        if self.answer is None:
-            self.answer = index
-            self.draw_quiz()
-
-    def next_question(self):
-        self.question += 1
-        self.answer = None
-        self.draw_quiz()
 
 
 class Stage:
@@ -1700,8 +2010,7 @@ class Stage:
             self.text(x+25,439,note,22,'#8facbf',width=385)
         self.text(78,649,'Екранните изкривявания и синият екран бяха визуални ефекти.',27,'#bacdde')
         self.text(78,698,'По тях сами по себе си не се поставя диагноза за вирус.',25,'#8facbf')
-        self.button(80,785,358,64,'Разследване с класа →',self.app.open_quiz,'#226555',size=23)
-        self.button(463,785,269,64,'Към панела',self.app.stop,'#233f58',size=23)
+        self.button(80,785,358,64,'Към контролния панел',self.app.stop,'#226555',size=22)
 
 
 class ScreenFrames:
