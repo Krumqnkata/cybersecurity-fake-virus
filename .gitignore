@@ -1,0 +1,9 @@
+# Python кеш и компилирани файлове
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Кеш на инструменти
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
