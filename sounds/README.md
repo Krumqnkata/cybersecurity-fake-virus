@@ -1,0 +1,21 @@
+# Custom classroom sounds
+
+Поставете тук собствен PCM WAV файл, за да замените съответния вграден сигнал. Името трябва да съвпада точно:
+
+- `browser.wav`
+- `installer.wav`
+- `tab.wav`
+- `notification.wav`
+- `advert.wav`
+- `warning.wav`
+- `scanner.wav`
+- `error.wav`
+- `terminal.wav`
+- `glitch.wav`
+- `files.wav`
+- `ransom.wav`
+- `crash.wav`
+- `reboot.wav`
+- `debrief.wav`
+
+Препоръка: PCM WAV, mono или stereo, 16-bit, с продължителност под 2 секунди и умерена сила. Невалиден или неподдържан файл няма да прекъсне демонстрацията; грешката се записва само в учебния журнал. Не използвайте звук, съдържащ истински Windows alert, глас или лично разпознаваема информация без разрешение.
