@@ -1,4 +1,5 @@
 import json
+import base64
 import contextlib
 import io
 import os
@@ -123,7 +124,30 @@ class SoundBankTests(unittest.TestCase):
                     self.assertGreater(audio.getnframes(),0)
 
 
+class WindowsToastTests(unittest.TestCase):
+    def test_encoded_toast_is_local_labeled_and_escapes_text(self):
+        encoded=classroom.WindowsToastNotifier.encoded_script(
+            "УЧЕБНА СИМУЛАЦИЯ • Teacher's alert",'Само локално известие')
+        script=base64.b64decode(encoded).decode('utf-16le')
+        self.assertIn('ToastNotificationManager',script)
+        self.assertIn("Teacher''s alert",script)
+        self.assertIn('Само локално известие',script)
+        self.assertIn("$toast.ExpirationTime",script)
+        self.assertNotIn('http://',script)
+        self.assertNotIn('https://',script)
+
+
 class ReliabilityPrimitiveTests(unittest.TestCase):
+    def test_extended_story_is_ordered_long_and_varied(self):
+        times=[moment for moment,_ in classroom.TIMELINE]
+        scenes={scene for _,scene in classroom.TIMELINE}
+        self.assertEqual(times,sorted(times))
+        self.assertEqual(classroom.MASTER_DURATION,660)
+        self.assertTrue({'uac','firewall','taskmanager','updater','ransom','blue','reboot'} <= scenes)
+        self.assertNotIn('spyware',scenes)
+        for scene in scenes-{'finish'}:
+            self.assertTrue(hasattr(classroom.Classroom,'scene_'+scene),scene)
+
     def test_profiles_and_absolute_caps(self):
         self.assertEqual(PROFILES['Училищен безопасен'].max_tabs,4)
         self.assertEqual(PROFILES['Училищен безопасен'].max_effects,6)
@@ -166,7 +190,8 @@ class ReliabilityPrimitiveTests(unittest.TestCase):
 
     def test_chapter_index_supports_skipping(self):
         self.assertEqual(retained_chapter_index(0,classroom.CHAPTERS),0)
-        self.assertEqual(retained_chapter_index(255,classroom.CHAPTERS),6)
+        self.assertEqual(retained_chapter_index(255,classroom.CHAPTERS),3)
+        self.assertEqual(retained_chapter_index(475,classroom.CHAPTERS),7)
         self.assertEqual(retained_chapter_index(999,classroom.CHAPTERS),len(classroom.CHAPTERS)-1)
 
 
@@ -338,10 +363,12 @@ class NativeEffectAcceptanceTests(unittest.TestCase):
     def test_all_native_scene_builders_smoke(self):
         root=classroom.tk.Tk();root.withdraw()
         app=classroom.Classroom(root,enable_hotkeys=False)
+        app.windows_notifications.set(False)
         app.hotkeys_ok=True;app.running=True;app.mode='manual';app.scenario.new_session()
         app.session=classroom.NativeSession(max_tabs=4,generation=app.scenario.generation)
         try:
-            scenes=(app.scene_installer,app.scene_notification,app.scene_warning,app.scene_advert,
+            scenes=(app.scene_uac,app.scene_installer,app.scene_notification,app.scene_warning,
+                    app.scene_firewall,app.scene_taskmanager,app.scene_updater,app.scene_advert,
                     app.scene_terminal,app.scene_scanner,app.scene_error,app.scene_ransom)
             for scene in scenes:
                 app.limiter.reset();scene();root.update()

@@ -20,9 +20,10 @@ py cyber_classroom.py
 1. Натиснете **„Провери готовността“**.
 2. Проверете глобалните комбинации, временната папка, браузъра и Pillow.
 3. Изберете ресурсен профил. **„Училищен безопасен“** е препоръчаният и стандартен избор.
-4. Изберете **„Автоматично“** или **„Учителско темпо“**.
-5. Преди RAM-only кадъра затворете чувствителни прозорци на работния плот.
-6. Направете пълна проба на конкретния демонстрационен компютър.
+4. Изберете продължителност **8, 12 или 15 минути**. Стандартната свързана история е 12 минути.
+5. Изберете **„Автоматично“** или **„Учителско темпо“**.
+6. Преди RAM-only кадъра затворете чувствителни прозорци на работния плот.
+7. Направете пълна проба на конкретния демонстрационен компютър.
 
 ## Ресурсни профили
 
@@ -58,14 +59,20 @@ py cyber_classroom.py
 
 ## Тематични звуци
 
-Опцията **„Тематичен звук“** включва 15 кратки различими WAV сигнала за browser/download, CaveDepths installer, нов tab, notification, реклама, warning, scan, error, terminal, glitch, файлове, ransomware reconstruction, crash, reboot и debrief. **„Тест“** просвирва пример преди урок. Генерираните файлове са включени в `sounds`, без download, микрофон или външна библиотека. Ако някой липсва, приложението синтезира временен безопасен fallback и премахва кеша при изход.
+Опцията **„Тематичен звук“** включва 19 кратки различими WAV сигнала, включително отделни cues за browser/download, UAC, CaveDepths installer, firewall, Task Manager, runtime updater, scan, error, terminal, ransomware reconstruction, crash, reboot и debrief. **„Тест“** просвирва пример преди урок. Генерираните файлове са включени в `sounds`, без download, микрофон или външна библиотека. Ако някой липсва, приложението синтезира временен безопасен fallback и премахва кеша при изход.
 
 Всеки сигнал може да бъде заменен: поставете PCM WAV файл с точното име в папка `sounds` до `cyber_classroom.py`. Поддържаните имена и препоръките са описани в [sounds/README.md](sounds/README.md). При пауза, **„Спри / изчисти“**, изключване на отметката или изход текущият звук спира веднага.
+
+Опцията **„Windows известия“** е включена по подразбиране и изпраща ясно означени учебни toast известия през локалния Windows Notification Center при подозрителната активност, края на фалшивото сканиране и края на runtime update сцената. Те нямат бутони, линкове или команди, rate-limited са и изтичат след около 20 минути. Изключването на отметката оставя само вътрешната визуална notification сцена. Focus Assist, Do Not Disturb или училищна групова политика може да скрие банера, без да прекъсне историята.
 
 ## Различните учебни интерфейси
 
 - **CaveDepths Mod Setup** — wizard около 600 × 440 с Welcome, Options, Installing и Completed; Back, Next, Cancel и Finish са активни. Неравномерните фази са предварително зададени.
-- **Notification** — малък `WS_EX_NOACTIVATE` toast до work area, с източник, час, Details и dismiss. Не е истинско постоянно Windows известие.
+- **User Account Control reconstruction** — topmost consent dialog за CaveDepths с Unknown publisher, file origin, details и работещи Yes/No действия. Това е обикновен application window и не иска elevation.
+- **Firewall warning** — свързано предупреждение за `mod_update_helper.exe`, private/public network choices и видим резултат без създаване на firewall rule.
+- **Task Manager classroom view** — resizable process table с променящи се CPU, Disk, Network и GPU стойности и работещ `End demo task`. Данните са синтетични; не се изброяват реални процеси.
+- **Block Runtime updater** — отделен staged updater с fictional signature check, progress, Cancel и Completed състояние; не инсталира компонент.
+- **Notification** — малък `WS_EX_NOACTIVATE` toast до work area, с източник, час, Details и dismiss, плюс опционално истинско известие в Windows Notification Center. И двете са видимо означени като учебна симулация.
 - **Security warning** — отделен restrained dialog с fictional process, severity и работещи разширяеми technical details.
 - **Application errors** — четири авторски варианта: not responding, missing component, access denied и failed update.
 - **Classroom Terminal** — resizable native прозорец, Consolas, bounded prerecorded scrollback и неравномерно време. Не се стартира shell и не се изпълнява команда.
@@ -141,7 +148,7 @@ py -m unittest tests.test_cyber_classroom.NativeEffectAcceptanceTests -v
 
 При разработката на 7.0 са изпълнени:
 
-- 26 default-discovery tests: успешно, 4 opt-in Win32 tests пропуснати по дизайн;
+- 28 default-discovery tests: успешно, 4 opt-in Win32 tests пропуснати по дизайн;
 - 4 opt-in Win32 tests: успешно, включително 10 native lifecycle цикъла без unbounded USER/GDI handle growth;
 - 300 ms реален Tk panel startup/cleanup smoke test: успешно;
 - `py -m py_compile`: успешно.
@@ -168,5 +175,7 @@ Bounded synthetic Pillow benchmark на наличната development маши�
 - Bounded/coalesced queues, owner-thread Win32 updates, aggregate cleanup и browser reset.
 - Очакваните Edge/Chrome loopback disconnect-и при затваряне не отпечатват подвеждащи socket tracebacks; другите server грешки остават видими.
 - Добавени са локално синтезирани тематични WAV сигнали, preview, pause/stop cleanup и exact-name custom overrides.
+- Добавени са opt-out Windows Notification Center известия с учебна маркировка, throttling и автоматично изтичане.
+- Историята е разширена до 8/12/15 минути с UAC, firewall, Task Manager и runtime updater етапи и автоматично преминаващ installer.
 - Retained fullscreen layouts, bounded internal transforms с full-window presentation, reduced/static motion и pressure fallback.
 - Разширени unit и opt-in Windows regression тестове.

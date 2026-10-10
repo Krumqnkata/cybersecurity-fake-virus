@@ -7,9 +7,10 @@
 - [ ] Windows 10/11, Python 3.10+ и Pillow са записани в протокола.
 - [ ] Резолюция 1366 × 768: панелът се scroll-ва и всички controls са достижими.
 - [ ] 100%, 150% и 200% display scaling: dismiss/Stop controls остават в work area и над taskbar.
-- [ ] „Провери готовността“ отчита temp storage, hotkeys, browser policy и Pillow честно.
+- [ ] „Провери готовността“ отчита temp storage, hotkeys, browser policy, Pillow и Windows Notification Center честно.
 - [ ] Sensitive windows са затворени преди screen snapshot сцената.
 - [ ] Тест без интернет: шестте localhost страници и бутоните им работят; няма external requests от supplied content.
+- [ ] При включено „Windows известия“ се появява ясно означен учебен toast в Notification Center; при изключена отметка не се изпраща. Проверете и при Focus Assist / Do Not Disturb.
 
 ## Emergency controls
 
@@ -21,7 +22,11 @@
 
 ## Native scenes
 
+- [ ] UAC reconstruction: Unknown publisher, details и Yes/No; не се появява истински secure desktop или elevation prompt.
 - [ ] Installer: Welcome → Options → Installing → Completed; Back, Next, Cancel, Finish; Cancel спира progress.
+- [ ] Firewall warning: private/public choices и action result; няма ново firewall правило.
+- [ ] Task Manager classroom view: synthetic CPU/Disk/Network/GPU values и End demo task; не се четат реални процеси.
+- [ ] Runtime updater: staged progress, Cancel и Completed; не се инсталира компонент.
 - [ ] Toast: не взема focus, има timestamp, Details и dismiss; stacking остава в profile cap.
 - [ ] Warning: Show/Hide details реално resize-ва и показва/скрива съдържанието.
 - [ ] Error wall: виждат се поне четирите варианта без infinite replacement.
@@ -45,7 +50,7 @@
 - [ ] `.locked` е rename, не encryption; Stop връща непроменените имена.
 - [ ] Edited file, conflicting plain filename и replacement link не се overwrite-ват/follow-ват.
 - [ ] Screen distortion прави един RAM-only capture, пази desktop recognizable и завършва с recovery.
-- [ ] Reduced motion и Static frame намаляват updates; School Safe upload target е до 960 × 540.
+- [ ] Reduced motion и Static frame намаляват updates; School Safe internal transform target е до 960 × 540, а presentation покрива целия прозорец.
 - [ ] Capture failure преминава към static fallback и връща контролния панел при Stop.
 - [ ] Blue/reboot показват simulation cue и не предизвикват real crash/reboot.
 

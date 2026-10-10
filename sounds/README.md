@@ -3,12 +3,16 @@
 Поставете тук собствен PCM WAV файл, за да замените съответния вграден сигнал. Името трябва да съвпада точно:
 
 - `browser.wav`
+- `uac.wav`
 - `installer.wav`
 - `tab.wav`
 - `notification.wav`
 - `advert.wav`
 - `warning.wav`
+- `firewall.wav`
 - `scanner.wav`
+- `taskmanager.wav`
+- `updater.wav`
 - `error.wav`
 - `terminal.wav`
 - `glitch.wav`
