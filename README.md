@@ -1,10 +1,10 @@
-# Дигитални детективи — Cyber Classroom 7.0
+# Дигитални детективи — Cyber Classroom 8.0
 
 Учителско приложение за визуална демонстрация на признаци, които могат да се срещнат при компютърен инцидент. Сцените изглеждат като отделни Windows приложения, но не извършват зловредни действия.
 
-> Това е видимо обозначена учебна симулация. Няма реален WannaCry, шифроване, сканиране, инсталиране, срив или рестартиране.
+> Преди старта се показва недвусмислено потвърждение, че това е контролирана учебна симулация. По време на историята интерфейсите остават достоверни, а аварийните клавиши са винаги активни. Няма реален malware, шифроване, системно сканиране, инсталиране, срив или рестартиране.
 
-Платформа: Windows 10/11, Python 3.10+ и български учителски интерфейс. Не са нужни администраторски права.
+Платформа: Windows 10/11, Python 3.10+ и български учителски интерфейс. Системните сцени автоматично следват Windows 10/11 и българския/английския UI език. Не са нужни администраторски права.
 
 ## Стартиране
 
@@ -20,10 +20,11 @@ py cyber_classroom.py
 1. Натиснете **„Провери готовността“**.
 2. Проверете глобалните комбинации, временната папка, браузъра и Pillow.
 3. Изберете ресурсен профил. **„Училищен безопасен“** е препоръчаният и стандартен избор.
-4. Изберете продължителност **8, 12 или 15 минути**. Стандартната свързана история е 12 минути.
-5. Изберете **„Автоматично“** или **„Учителско темпо“**.
-6. Преди RAM-only кадъра затворете чувствителни прозорци на работния плот.
-7. Направете пълна проба на конкретния демонстрационен компютър.
+4. Изберете продължителност **10, 15 или 20 минути**. Стандартната причинно свързана история е 15 минути; трите варианта имат различни сцени, а не само различна скорост.
+5. Изберете презентационен монитор и **„Автоматично“** или **„Учителско темпо“**.
+6. В учителски режим отговаряйте на решенията с **„Приеми резултата“** или **„Покажи компрометирания път“**.
+7. Преди RAM-only кадъра затворете чувствителни прозорци на избрания монитор.
+8. Направете пълна проба на конкретния демонстрационен компютър.
 
 ## Ресурсни профили
 
@@ -52,36 +53,40 @@ py cyber_classroom.py
 | `Esc` | Спиране от Tk или native Win32 прозорец. |
 | `F6` | Следваща глава от Tk или native Win32 прозорец. |
 | `F11` | Fullscreen toggle от Tk или native Win32 прозорец. |
-| **Повтори глава** | Инвалидира старите callbacks и стартира текущата глава отначало. |
+| **Повтори глава** | Инвалидира старите callbacks и възстановява причинното и файловото състояние преди началото на главата. |
 | **Спри / изчисти** | Идемпотентно спиране и двуфазно освобождаване. |
 
 При пауза учителят избира дали сцените да останат видими за обсъждане, или да се скрият. Един pause-aware часовник замразява timers, reveals, progress, sound, spawning и browser actions. В **„Учителско темпо“** историята спира на границите между главите и продължава с **Next/F6**.
 
 ## Тематични звуци
 
-Опцията **„Тематичен звук“** включва 19 кратки различими WAV сигнала, включително отделни cues за browser/download, UAC, CaveDepths installer, firewall, Task Manager, runtime updater, scan, error, terminal, ransomware reconstruction, crash, reboot и debrief. **„Тест“** просвирва пример преди урок. Генерираните файлове са включени в `sounds`, без download, микрофон или външна библиотека. Ако някой липсва, приложението синтезира временен безопасен fallback и премахва кеша при изход.
+Опцията **„Тематичен звук“** е изключена по подразбиране. Системните сцени използват кратки Windows звукови сигнали, а измислените приложения — локалните WAV файлове за browser/download, installer, Task Manager, updater, scanner, terminal, ransom, crash, reboot и debrief. **„Тест“** просвирва пример преди урок. Няма download, микрофон или външна звукова библиотека; при липсващ файл се използва временен синтезиран fallback, който се премахва при изход.
 
 Всеки сигнал може да бъде заменен: поставете PCM WAV файл с точното име в папка `sounds` до `cyber_classroom.py`. Поддържаните имена и препоръките са описани в [sounds/README.md](sounds/README.md). При пауза, **„Спри / изчисти“**, изключване на отметката или изход текущият звук спира веднага.
 
-Опцията **„Windows известия“** е включена по подразбиране и изпраща ясно означени учебни toast известия през локалния Windows Notification Center при подозрителната активност, края на фалшивото сканиране и края на runtime update сцената. Те нямат бутони, линкове или команди, rate-limited са и изтичат след около 20 минути. Изключването на отметката оставя само вътрешната визуална notification сцена. Focus Assist, Do Not Disturb или училищна групова политика може да скрие банера, без да прекъсне историята.
+Опцията **„Windows известия“** е включена по подразбиране и изпраща реални локални toast известия през Windows Notification Center при подозрителната активност, края на сканирането и възстановяването. Те нямат бутони, линкове или команди, rate-limited са, изтичат автоматично и записите от собствената `classroom-demo` група се премахват при Stop/изход. Изключването оставя само вътрешната notification сцена. Focus Assist, Do Not Disturb или училищна групова политика може да скрие банера, без да прекъсне историята.
 
 ## Различните учебни интерфейси
 
 - **CaveDepths Mod Setup** — wizard около 600 × 440 с Welcome, Options, Installing и Completed; Back, Next, Cancel и Finish са активни. Неравномерните фази са предварително зададени.
 - **User Account Control reconstruction** — topmost consent dialog за CaveDepths с Unknown publisher, file origin, details и работещи Yes/No действия. Това е обикновен application window и не иска elevation.
-- **Firewall warning** — свързано предупреждение за `mod_update_helper.exe`, private/public network choices и видим резултат без създаване на firewall rule.
-- **Task Manager classroom view** — resizable process table с променящи се CPU, Disk, Network и GPU стойности и работещ `End demo task`. Данните са синтетични; не се изброяват реални процеси.
+- **Firewall warning** — свързано предупреждение за `ModUpdateHelper.exe`, private/public network choices и видим резултат без създаване на firewall rule.
+- **Task Manager view** — resizable process table с променящи се CPU, Disk, Network и GPU стойности и работещо спиране на измисления процес. Данните са предварително записани; не се изброяват реални процеси.
 - **Block Runtime updater** — отделен staged updater с fictional signature check, progress, Cancel и Completed състояние; не инсталира компонент.
-- **Notification** — малък `WS_EX_NOACTIVATE` toast до work area, с източник, час, Details и dismiss, плюс опционално истинско известие в Windows Notification Center. И двете са видимо означени като учебна симулация.
+- **Tray helper и Notification** — временна истинска notification-area икона с Open status/Exit helper, малък `WS_EX_NOACTIVATE` toast и опционално истинско известие в Windows Notification Center. Всички са application-owned и се почистват при Stop.
 - **Security warning** — отделен restrained dialog с fictional process, severity и работещи разширяеми technical details.
 - **Application errors** — четири авторски варианта: not responding, missing component, access denied и failed update.
 - **Classroom Terminal** — resizable native прозорец, Consolas, bounded prerecorded scrollback и неравномерно време. Не се стартира shell и не се изпълнява команда.
-- **PC Defender** — отделно fictional scanner приложение със sidebar, synthetic fixture, Pause/Resume, Stop и Details; състояния scanning, paused, cancelled и completed.
-- **Ransomware reconstruction** — независимо movable/closable native приложение с timer, scrollable обяснение, nonpayable demo ID и брой `.locked` имена от текущата сесия.
-- **Screen distortion** — един кадър от основния монитор, само в RAM; subtle displacement, tears, melt/tunnel и recovery. Има reduced-motion и static режими.
-- **Crash/reboot** — свързана fullscreen възстановка: BSOD прогрес до 100%, декоративен несканируем code element и автоматични `Restarting`, black transition, `Getting Windows ready` и `Welcome` фази. Учебната маркировка и emergency controls остават видими; Windows не се срива и не се рестартира.
+- **PC Defender** — отделно scanner приложение със sidebar, предварително записани данни, Pause/Resume, Stop и Details; след него има различим Windows Security Protection History екран.
+- **File Properties и Network activity** — отделни разследващи сцени в 20-минутната история: липсващ цифров подпис и офлайн snapshot към резервираните TEST-NET адреси. Няма реално мрежово свързване.
+- **Ransomware impact** — независимо movable/closable native приложение с timer, nonpayable case ID и брой `.locked` имена от текущата сесия.
+- **Recovery** — карантина на измислените компоненти и видимо връщане на по едно от осемте имена. При конфликт спира и иска преглед, без overwrite.
+- **Screen distortion** — един кадър от избрания презентационен монитор, само в RAM; subtle displacement, tears, melt/tunnel и recovery. Има reduced-motion и static режими.
+- **Crash/reboot** — отделни ръчни казуси, които не участват в ransomware историята. Те са fullscreen възстановки; Windows не се срива и не се рестартира.
 
-Шестте loopback страници разказват една свързана история. Първата прилича на измислен портал за Minecraft Java модове и предлага **CaveDepths** за версия 1.21.1/Fabric, но вместо нормален mod файл показва подозрителен `.exe` installer. След нея се появяват тематично свързани gaming reward, фалшив web scan, предупреждение за игровия акаунт, измислен runtime update и FPS booster. Всеки сайт има различни layout, title, favicon и плътност. Няма painted fake address bar; истинският `127.0.0.1` адрес остава видим и никъде не се прави реален download.
+Шестте loopback страници разказват една свързана история. Първата прилича на измислен портал за Minecraft Java модове и предлага **CaveDepths** за версия 1.21.1/Fabric, но вместо нормален mod файл показва подозрителен `.exe` installer. След нея се появяват тематично свързани gaming reward, web scan, предупреждение за игровия акаунт, runtime update и FPS booster. Всеки сайт има различни layout, title, favicon и плътност. Няма painted fake address bar; истинският `127.0.0.1` адрес остава видим и никъде не се прави реален download.
+
+Стандартният 15-минутен сценарий свързва сайта, download действието, UAC, installer, tray helper, известие, допълнителни tabs, firewall, Task Manager, updater, application error, Windows Security, scanner, Protection History, response console, Explorer, осемте `.locked` имена, ransom натиска и поетапното възстановяване. Автоматичният режим следва компрометирания път; учителският режим спира при решение и никога не пренебрегва натиснат бутон без видим резултат.
 
 ## Браузърна изолация и локални страници
 
@@ -144,12 +149,12 @@ $env:CYBER_CLASSROOM_NATIVE_TESTS='1'
 py -m unittest tests.test_cyber_classroom.NativeEffectAcceptanceTests -v
 ```
 
-Проверяват се resource caps, wall-clock rate limits, stale generation events, duplicate start, pause clock, chapter indexing, loopback validation/rate limit, six distinct pages, browser-state reset, strict file conflicts, bounded image size, native keyboard bridge, всички native scene builders и regression сценарият Tk mainloop + HTTP thread + ctypes Win32 callback под Python 3.13.
+Проверяват се трите story графа, causal replay, учителски разклонения, stale generation events, duplicate start, pause clock, loopback validation/rate limit, six distinct pages, monitor browser positioning, tray lifecycle, strict file conflicts, поетапно recovery, bounded image size, native keyboard bridge, всички native scene builders и regression сценарият Tk mainloop + HTTP thread + ctypes Win32 callback под Python 3.13.
 
-При разработката на 7.0 са изпълнени:
+При разработката на 8.0 са изпълнени:
 
-- 28 default-discovery tests: успешно, 4 opt-in Win32 tests пропуснати по дизайн;
-- 4 opt-in Win32 tests: успешно, включително 10 native lifecycle цикъла без unbounded USER/GDI handle growth;
+- 40 default-discovery tests: успешно, 5 opt-in Win32 tests пропуснати по дизайн;
+- 5 opt-in Win32 tests: успешно, включително tray lifecycle и 10 native lifecycle цикъла без unbounded USER/GDI handle growth;
 - 300 ms реален Tk panel startup/cleanup smoke test: успешно;
 - `py -m py_compile`: успешно.
 
@@ -161,21 +166,18 @@ Bounded synthetic Pillow benchmark на наличната development маши�
 
 - Приложението е за Windows 10/11 и не е антивирусен продукт.
 - Видим симптом сам по себе си не доказва заразяване.
-- Кадърът използва само основния монитор и се пази само докато сцената е активна.
+- Кадърът използва само избрания презентационен монитор и се пази само докато сцената е активна.
 - File Explorer прозорецът и учебната папка остават за обсъждане.
 - Force-kill на Python или изключване на компютъра може да прекъсне normal filename restoration.
 - Реалният браузър, DPI 200%, taskbar/work-area placement и handle growth трябва да се проверят на конкретната presentation машина.
 
-## Changelog 7.0
+## Changelog 8.0
 
-- Намалени и централизирани school-safe ресурси.
-- Шест отделни browser page designs и поправен локален action feedback.
-- Нови wizard/scanner states, четири errors, toast, expandable warning, terminal и native ransomware reconstruction.
-- Shared `ScenarioState`, generation guards, teacher-paced mode, Replay и resource indicator.
-- Bounded/coalesced queues, owner-thread Win32 updates, aggregate cleanup и browser reset.
-- Очакваните Edge/Chrome loopback disconnect-и при затваряне не отпечатват подвеждащи socket tracebacks; другите server грешки остават видими.
-- Добавени са локално синтезирани тематични WAV сигнали, preview, pause/stop cleanup и exact-name custom overrides.
-- Добавени са opt-out Windows Notification Center известия с учебна маркировка, throttling и автоматично изтичане.
-- Историята е разширена до 8/12/15 минути с UAC, firewall, Task Manager и runtime updater етапи и автоматично преминаващ installer.
-- Retained fullscreen layouts, bounded internal transforms с full-window presentation, reduced/static motion и pressure fallback.
-- Разширени unit и opt-in Windows regression тестове.
+- Три отделни причинни истории за 10/15/20 минути; 15-минутната е стандартна.
+- Единен event-driven `ScenarioState`, детерминирано Replay и generation-guarded callbacks.
+- Учителски разклонения, които приемат безопасния резултат или показват компрометирания път.
+- Автоматични Windows 10/11 и BG/EN варианти, избор на презентационен монитор и DPI-aware placement.
+- Истинска временна tray икона, Notification Center cleanup и шест различими локални сайта.
+- Нови Protection History, File Properties, offline network snapshot и поетапно recovery сцени.
+- Еднакви имена `CaveDepths_Setup.exe`, `BlockRuntimeHost.exe` и `ModUpdateHelper.exe` през цялата история.
+- Crash/reboot/distortion са отделни ръчни казуси, извън основната история.

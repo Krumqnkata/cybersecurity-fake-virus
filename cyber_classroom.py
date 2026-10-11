@@ -1,4 +1,4 @@
-"""Дигитални детективи 7.0 — демонстрация върху истинския Windows.
+"""Дигитални детективи 8.0 — демонстрация върху истинския Windows.
 
 Windows 10/11 + Python 3.10+ с Win32 API, tkinter и Pillow.
 Стартиране: py cyber_classroom.py
@@ -7,7 +7,7 @@ Windows 10/11 + Python 3.10+ с Win32 API, tkinter и Pillow.
 Ctrl+Alt+P: глобална пауза / продължаване.
 Ctrl+Alt+Q: спира ефектите, затваря учебния браузър и излиза.
 Esc: спиране от наш активен прозорец. F6: следваща глава. F11: цял екран.
-Продължителност: 8, 12 или 15 минути, без времето в пауза.
+Продължителност: 10, 15 или 20 минути, без времето в пауза.
 
 Използва реален Edge/Chrome с нов временен профил и до 4/6 локални раздела
 според избрания ресурсен профил (абсолютен лимит 8).
@@ -20,7 +20,7 @@ Esc: спиране от наш активен прозорец. F6: следв�
 в истинския File Explorer. Само създадените файлове получават суфикс .locked.
 При спиране връща имената им, ако съдържанието е непроменено и няма конфликт.
 Няма шифроване. Папката и прозорецът на File Explorer остават за преглед.
-Графичната сцена взема еднократна снимка на основния монитор САМО в RAM.
+Графичната сцена взема еднократна снимка на избрания презентационен монитор САМО в RAM.
 Разкъсва, разтича и повтаря тези пиксели в собствен прозорец върху Windows.
 Снимката не се записва или изпраща; оригиналният работен плот е непокътнат.
 Няма четене на лични файлове, запис на клавиши, достъп до камера/микрофон,
@@ -36,6 +36,7 @@ import ctypes
 from ctypes import wintypes
 from array import array
 import base64
+from dataclasses import dataclass
 import hashlib
 import math
 import json
@@ -58,8 +59,9 @@ import wave
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from classroom_core import (
-    ABSOLUTE_MAX_EFFECTS, ABSOLUTE_MAX_TABS, BoundedEventBus, PROFILES,
-    RateLimiter, ScenarioState, retained_chapter_index,
+    ABSOLUTE_MAX_EFFECTS, ABSOLUTE_MAX_TABS, BoundedEventBus, DEFAULT_STORY_LABEL,
+    PROFILES, RateLimiter, STORY_PRESETS, ScenarioEvent, ScenarioState,
+    retained_chapter_index,
 )
 
 try:
@@ -88,7 +90,7 @@ def configure_logging():
     handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(message)s'))
     LOG.addHandler(handler)
     LOG.setLevel(logging.INFO)
-    LOG.info('Version 7.0; Python %s; platform %s; Pillow available=%s',
+    LOG.info('Version 8.0; Python %s; platform %s; Pillow available=%s',
              sys.version.split()[0], sys.platform, Image is not None)
 
 
@@ -123,6 +125,9 @@ class SoundBank:
         'firewall': 'firewall', 'scanner': 'scanner', 'taskmanager': 'taskmanager',
         'updater': 'updater', 'error': 'error', 'errorwall': 'error',
         'terminal_chapter': 'terminal', 'glitch': 'glitch', 'files_chapter': 'files',
+        'download':'browser','helper':'notification','helper_status':'notification',
+        'protection_history':'warning','properties':'notification',
+        'network_activity':'terminal','explorer':'files','recovery':'debrief',
         'ransom': 'ransom', 'blue': 'crash', 'reboot': 'reboot', 'debrief': 'debrief',
     }
 
@@ -193,6 +198,16 @@ class SoundBank:
         cue = self.SCENES.get(scene)
         return self.play(cue) if cue else False
 
+    def play_system(self,alias):
+        if winsound is None or self.closed:
+            return False
+        try:
+            winsound.PlaySound(alias,winsound.SND_ALIAS|winsound.SND_ASYNC|winsound.SND_NODEFAULT)
+            return True
+        except RuntimeError:
+            LOG.exception('Windows system sound failed: %s',alias)
+            return False
+
     def stop(self):
         if winsound is not None:
             try:
@@ -260,6 +275,11 @@ exit 2
             return False
         self.last_sent=now
         encoded=self.encoded_script(title,body)
+        return self._start(encoded,'delivery')
+
+    def _start(self,encoded,operation):
+        if not self.available:
+            return False
         def worker():
             try:
                 result=subprocess.run(
@@ -267,13 +287,27 @@ exit 2
                     stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,
                     creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0),timeout=7,check=False)
                 if result.returncode:
-                    LOG.warning('Windows toast was not accepted; exit code=%s',result.returncode)
+                    LOG.warning('Windows toast %s was not accepted; exit code=%s',operation,result.returncode)
             except (OSError,subprocess.SubprocessError):
-                LOG.exception('Windows Notification Center delivery failed')
+                LOG.exception('Windows Notification Center %s failed',operation)
         self.threads[:]=[thread for thread in self.threads if thread.is_alive()]
         thread=threading.Thread(target=worker,name='ClassroomToast',daemon=True)
         self.threads.append(thread);thread.start()
         return True
+
+    def clear(self):
+        """Remove only the notification group created by this application."""
+        script="""
+$ErrorActionPreference = 'SilentlyContinue'
+[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] > $null
+$history = [Windows.UI.Notifications.ToastNotificationManager]::History
+foreach ($appId in @('Cyber Classroom', 'Microsoft.Windows.PowerShell', 'Windows PowerShell')) {
+    try { $history.RemoveGroup('classroom-demo', $appId) } catch {}
+}
+exit 0
+"""
+        encoded=base64.b64encode(script.encode('utf-16le')).decode('ascii')
+        return self._start(encoded,'cleanup')
 
     def close(self):
         self.closed=True
@@ -283,6 +317,106 @@ exit 2
             if remaining<=0:break
             thread.join(timeout=min(.12,remaining))
         self.threads.clear()
+
+
+@dataclass(frozen=True)
+class WindowsPresentationProfile:
+    generation: str
+    language: str
+    build: int
+    font: str
+    rounded_corners: bool
+
+    def text(self,bg,en):
+        return bg if self.language=='bg' else en
+
+
+@dataclass(frozen=True)
+class MonitorTarget:
+    index: int
+    device: str
+    monitor_rect: tuple[int,int,int,int]
+    work_rect: tuple[int,int,int,int]
+    primary: bool
+    dpi: int=96
+
+    @property
+    def label(self):
+        left,top,right,bottom=self.monitor_rect
+        suffix=' • основен' if self.primary else ''
+        return f'{self.index}: {self.device or "Display"} • {right-left}×{bottom-top}{suffix}'
+
+
+class MonitorInfoExW(ctypes.Structure):
+    _fields_=[('cbSize',wintypes.DWORD),('rcMonitor',wintypes.RECT),
+              ('rcWork',wintypes.RECT),('dwFlags',wintypes.DWORD),
+              ('szDevice',wintypes.WCHAR*32)]
+
+
+def detect_windows_profile(build=None,language_id=None):
+    if build is None:
+        try:
+            build=sys.getwindowsversion().build if sys.platform=='win32' else 0
+        except AttributeError:
+            build=0
+    if language_id is None and sys.platform=='win32':
+        try:
+            kernel=ctypes.WinDLL('kernel32',use_last_error=True)
+            kernel.GetUserDefaultUILanguage.restype=wintypes.LANGID
+            language_id=int(kernel.GetUserDefaultUILanguage())
+        except (OSError,AttributeError):
+            language_id=0
+    language='bg' if int(language_id or 0)&0x3ff==0x02 else 'en'
+    windows11=int(build or 0)>=22000
+    return WindowsPresentationProfile('windows11' if windows11 else 'windows10',language,
+                                      int(build or 0),'Segoe UI Variable' if windows11 else 'Segoe UI',
+                                      windows11)
+
+
+def enumerate_monitors():
+    """Return stable monitor/work-area data without changing display settings."""
+    if sys.platform!='win32':
+        return [MonitorTarget(1,'Preview',(0,0,1280,720),(0,0,1280,680),True,96)]
+    try:
+        user=ctypes.WinDLL('user32',use_last_error=True)
+        callback_type=ctypes.WINFUNCTYPE(wintypes.BOOL,wintypes.HANDLE,wintypes.HDC,
+                                         ctypes.POINTER(wintypes.RECT),wintypes.LPARAM)
+        user.GetMonitorInfoW.argtypes=[wintypes.HANDLE,ctypes.POINTER(MonitorInfoExW)]
+        user.GetMonitorInfoW.restype=wintypes.BOOL
+        user.EnumDisplayMonitors.argtypes=[wintypes.HDC,ctypes.POINTER(wintypes.RECT),callback_type,wintypes.LPARAM]
+        user.EnumDisplayMonitors.restype=wintypes.BOOL
+        found=[]
+        def visit(handle,_dc,_rect,_data):
+            info=MonitorInfoExW();info.cbSize=ctypes.sizeof(info)
+            if not user.GetMonitorInfoW(handle,ctypes.byref(info)):
+                return True
+            dpi=96
+            try:
+                shcore=ctypes.WinDLL('shcore',use_last_error=True)
+                xdpi=wintypes.UINT();ydpi=wintypes.UINT()
+                shcore.GetDpiForMonitor.argtypes=[wintypes.HANDLE,ctypes.c_int,
+                                                  ctypes.POINTER(wintypes.UINT),ctypes.POINTER(wintypes.UINT)]
+                shcore.GetDpiForMonitor.restype=ctypes.HRESULT
+                if shcore.GetDpiForMonitor(handle,0,ctypes.byref(xdpi),ctypes.byref(ydpi))==0:
+                    dpi=int(xdpi.value)
+            except (OSError,AttributeError):
+                pass
+            rect=lambda value:(value.left,value.top,value.right,value.bottom)
+            found.append((str(info.szDevice),rect(info.rcMonitor),rect(info.rcWork),bool(info.dwFlags&1),dpi))
+            return True
+        callback=callback_type(visit)
+        if not user.EnumDisplayMonitors(None,None,callback,0):
+            raise ctypes.WinError(ctypes.get_last_error())
+        found.sort(key=lambda item:(not item[3],item[1][0],item[1][1]))
+        return [MonitorTarget(index,*item) for index,item in enumerate(found,1)]
+    except (OSError,AttributeError):
+        LOG.exception('Monitor enumeration failed; using the primary-screen fallback')
+        try:
+            user=ctypes.WinDLL('user32',use_last_error=True)
+            width,height=user.GetSystemMetrics(0),user.GetSystemMetrics(1)
+        except (OSError,AttributeError):
+            width,height=1280,720
+        return [MonitorTarget(1,'Primary',(0,0,width,height),(0,0,width,height),True,96)]
 
 
 def enable_dpi_awareness():
@@ -387,10 +521,10 @@ TERMINAL_LINES = [
     '', r'C:\Users\Student\Downloads> CaveDepths_Setup.exe /install',
     '[bootstrap] loading package ... OK',
     '[signature] publisher verification ... UNKNOWN',
-    '[consent] classroom UAC reconstruction displayed',
-    '[runtime] Block Runtime demo stage ready',
+    '[consent] elevation request accepted',
+    '[runtime] Block Runtime Host registered',
     '[firewall] outbound permission request ... BLOCKED',
-    '[mod_update_helper] worker process ready',
+    '[ModUpdateHelper] worker process ready',
     '[notice] unexpected child process detected',
     '[network] connection attempt blocked',
     '[worker] indexing document names ...',
@@ -407,23 +541,12 @@ TERMINAL_LINES = [
     '[notice] recovery instructions pending',
 ]
 
-# Connected master timeline, scaled to the selected 8/12/15-minute duration.
-TIMELINE = [
-    (0, 'browser'), (30, 'uac'), (43, 'installer'), (75, 'tabs'),
-    (92, 'notification'), (108, 'advert'), (124, 'warning'), (140, 'scanner'),
-    (165, 'firewall'), (190, 'taskmanager'),
-    (225, 'errorwall'), (265, 'updater'),
-    (295, 'terminal_chapter'), (325, 'warning'),
-    (360, 'glitch'), (400, 'files_chapter'), (430, 'taskmanager'), (455, 'error'),
-    (475, 'ransom'), (550, 'blue'), (580, 'reboot'),
-    (605, 'debrief'), (660, 'finish'),
-]
-MASTER_DURATION = TIMELINE[-1][0]
-CHAPTERS = [(0, 'Minecraft модът CaveDepths'), (75, 'Реклами след download-а'),
-            (165, 'Мрежа и процеси'), (225, 'Лавина от грешки'),
-            (295, 'Непознат помощен процес'), (360, 'Повреден екран'),
-            (400, 'Изчезващите документи'), (475, 'WannaCry: откуп'),
-            (550, 'Срив и рестартиране'), (605, 'Какво научихме')]
+# Compatibility aliases for integrations that inspect the standard story.
+# Runtime uses the selected preset directly; presets are not time-scaled clones.
+DEFAULT_STORY = STORY_PRESETS[DEFAULT_STORY_LABEL]
+TIMELINE = [(beat.at, beat.scene) for beat in DEFAULT_STORY.beats]
+MASTER_DURATION = DEFAULT_STORY.duration
+CHAPTERS = list(DEFAULT_STORY.chapters)
 class NativeWindowClass(ctypes.Structure):
     _fields_ = [('style',wintypes.UINT),('wndproc',ctypes.c_void_p),
                 ('class_extra',ctypes.c_int),('window_extra',ctypes.c_int),
@@ -434,6 +557,130 @@ class NativeWindowClass(ctypes.Structure):
 
 class InitCommonControls(ctypes.Structure):
     _fields_ = [('size',wintypes.DWORD),('classes',wintypes.DWORD)]
+
+
+class Guid(ctypes.Structure):
+    _fields_=[('data1',wintypes.DWORD),('data2',wintypes.WORD),('data3',wintypes.WORD),
+              ('data4',ctypes.c_ubyte*8)]
+
+
+class NotifyIconDataW(ctypes.Structure):
+    _fields_=[('cbSize',wintypes.DWORD),('hWnd',wintypes.HWND),('uID',wintypes.UINT),
+              ('uFlags',wintypes.UINT),('uCallbackMessage',wintypes.UINT),
+              ('hIcon',wintypes.HICON),('szTip',wintypes.WCHAR*128),
+              ('dwState',wintypes.DWORD),('dwStateMask',wintypes.DWORD),
+              ('szInfo',wintypes.WCHAR*256),('uVersion',wintypes.UINT),
+              ('szInfoTitle',wintypes.WCHAR*64),('dwInfoFlags',wintypes.DWORD),
+              ('guidItem',Guid),('hBalloonIcon',wintypes.HICON)]
+
+
+class OwnedTrayIcon:
+    """One process-owned notification-area icon with bounded, reversible UI."""
+    WM_CLOSE=0x0010;WM_DESTROY=0x0002;WM_APP_TRAY=0x8051
+    WM_LBUTTONUP=0x0202;WM_LBUTTONDBLCLK=0x0203;WM_RBUTTONUP=0x0205
+    NIM_ADD=0;NIM_DELETE=2;NIF_MESSAGE=1;NIF_ICON=2;NIF_TIP=4
+
+    def __init__(self,events,tooltip='Block Runtime Host'):
+        self.events=events;self.tooltip=tooltip[:127]
+        self.closed=False;self.hwnd=None;self.nid=None;self.callback=None
+        self.ready=threading.Event();self.stopping=threading.Event()
+        self.thread=threading.Thread(target=self._run,name='ClassroomTray',daemon=True)
+        self.thread.start()
+
+    def _run(self):
+        if sys.platform!='win32':
+            self.closed=True;self.ready.set();return
+        user=ctypes.WinDLL('user32',use_last_error=True)
+        shell=ctypes.WinDLL('shell32',use_last_error=True)
+        kernel=ctypes.WinDLL('kernel32',use_last_error=True)
+        callback_type=ctypes.WINFUNCTYPE(ctypes.c_ssize_t,wintypes.HWND,wintypes.UINT,
+                                         wintypes.WPARAM,wintypes.LPARAM)
+        user.RegisterClassW.argtypes=[ctypes.POINTER(NativeWindowClass)]
+        user.RegisterClassW.restype=wintypes.ATOM
+        user.CreateWindowExW.argtypes=[wintypes.DWORD,wintypes.LPCWSTR,wintypes.LPCWSTR,wintypes.DWORD,
+                                      ctypes.c_int,ctypes.c_int,ctypes.c_int,ctypes.c_int,wintypes.HWND,
+                                      wintypes.HMENU,wintypes.HINSTANCE,ctypes.c_void_p]
+        user.CreateWindowExW.restype=wintypes.HWND
+        user.DefWindowProcW.argtypes=[wintypes.HWND,wintypes.UINT,wintypes.WPARAM,wintypes.LPARAM]
+        user.DefWindowProcW.restype=ctypes.c_ssize_t
+        user.LoadIconW.restype=wintypes.HICON
+        user.CreatePopupMenu.restype=wintypes.HMENU
+        user.TrackPopupMenu.restype=wintypes.UINT
+        kernel.GetModuleHandleW.argtypes=[wintypes.LPCWSTR]
+        kernel.GetModuleHandleW.restype=wintypes.HMODULE
+        shell.Shell_NotifyIconW.argtypes=[wintypes.DWORD,ctypes.POINTER(NotifyIconDataW)]
+        shell.Shell_NotifyIconW.restype=wintypes.BOOL
+        class_name='CyberClassroomTray-'+secrets.token_hex(4)
+
+        def show_menu(hwnd):
+            menu=user.CreatePopupMenu()
+            if not menu:return
+            try:
+                user.AppendMenuW(menu,0,1,'Open status')
+                user.AppendMenuW(menu,0,2,'Exit helper')
+                point=wintypes.POINT();user.GetCursorPos(ctypes.byref(point))
+                user.SetForegroundWindow(hwnd)
+                command=user.TrackPopupMenu(menu,0x0100|0x0002,point.x,point.y,0,hwnd,None)
+                if command==1:self.events.post('tray_open',coalesce='tray_open')
+                elif command==2:self.events.post('tray_exit',priority=True)
+            finally:
+                user.DestroyMenu(menu)
+
+        def window_proc(hwnd,message,wparam,lparam):
+            if message==self.WM_APP_TRAY:
+                event=int(lparam)&0xffff
+                if event in (self.WM_LBUTTONUP,self.WM_LBUTTONDBLCLK):
+                    self.events.post('tray_open',coalesce='tray_open')
+                elif event==self.WM_RBUTTONUP:
+                    show_menu(hwnd)
+                return 0
+            if message==self.WM_CLOSE:
+                user.DestroyWindow(hwnd);return 0
+            if message==self.WM_DESTROY:
+                user.PostQuitMessage(0);return 0
+            return user.DefWindowProcW(hwnd,message,wparam,lparam)
+
+        self.callback=callback_type(window_proc)
+        instance=kernel.GetModuleHandleW(None)
+        wc=NativeWindowClass();wc.wndproc=ctypes.cast(self.callback,ctypes.c_void_p).value
+        wc.instance=instance;wc.icon=user.LoadIconW(None,ctypes.c_void_p(32516))
+        wc.cursor=user.LoadCursorW(None,ctypes.c_void_p(32512));wc.class_name=class_name
+        try:
+            if not user.RegisterClassW(ctypes.byref(wc)):
+                raise ctypes.WinError(ctypes.get_last_error())
+            self.hwnd=user.CreateWindowExW(0,class_name,'',0,0,0,0,0,
+                                            wintypes.HWND(-3),None,instance,None)
+            if not self.hwnd:
+                raise ctypes.WinError(ctypes.get_last_error())
+            self.nid=NotifyIconDataW();self.nid.cbSize=ctypes.sizeof(self.nid)
+            self.nid.hWnd=self.hwnd;self.nid.uID=1
+            self.nid.uFlags=self.NIF_MESSAGE|self.NIF_ICON|self.NIF_TIP
+            self.nid.uCallbackMessage=self.WM_APP_TRAY
+            self.nid.hIcon=user.LoadIconW(None,ctypes.c_void_p(32516))
+            self.nid.szTip=self.tooltip
+            if not shell.Shell_NotifyIconW(self.NIM_ADD,ctypes.byref(self.nid)):
+                raise ctypes.WinError(ctypes.get_last_error())
+            self.ready.set()
+            if self.stopping.is_set():user.PostMessageW(self.hwnd,self.WM_CLOSE,0,0)
+            msg=wintypes.MSG()
+            while user.GetMessageW(ctypes.byref(msg),None,0,0)>0:
+                user.TranslateMessage(ctypes.byref(msg));user.DispatchMessageW(ctypes.byref(msg))
+        except Exception as exc:
+            LOG.error('Tray icon failed: %s',exc)
+            self.events.post('tray_error',str(exc),coalesce='tray_error')
+            self.ready.set()
+        finally:
+            if self.nid is not None:
+                shell.Shell_NotifyIconW(self.NIM_DELETE,ctypes.byref(self.nid))
+            self.hwnd=None;self.closed=True
+
+    def close(self):
+        if self.closed:return
+        self.stopping.set();self.ready.wait(timeout=.15)
+        if self.hwnd:
+            try:ctypes.WinDLL('user32',use_last_error=True).PostMessageW(self.hwnd,self.WM_CLOSE,0,0)
+            except OSError:pass
+        self.thread.join(timeout=.35)
 
 
 class NativeEffect:
@@ -595,6 +842,7 @@ class NativeEffect:
                  role='app',resizable=False,topmost=None):
         self.ensure_registered()
         self.app=app
+        self.monitor=getattr(app,'presentation_monitor',None)
         self.born=app.clock
         self.closed=False
         self.closing=False
@@ -670,11 +918,16 @@ class NativeEffect:
         self.background_brush=self.gdi32.CreateSolidBrush(self.background)
         if not self.background_brush:
             raise ctypes.WinError(ctypes.get_last_error())
-        sw,sh=self.user32.GetSystemMetrics(0),self.user32.GetSystemMetrics(1)
-        work=wintypes.RECT(0,0,sw,sh)
-        self.user32.SystemParametersInfoW(0x0030,0,ctypes.byref(work),0)  # SPI_GETWORKAREA
-        left,top,right,bottom=work.left,work.top,work.right,work.bottom
-        self.dpi=self.user32.GetDpiForSystem() if hasattr(self.user32,'GetDpiForSystem') else 96
+        target=self.monitor
+        if target is not None:
+            left,top,right,bottom=target.work_rect
+            self.dpi=target.dpi
+        else:
+            sw,sh=self.user32.GetSystemMetrics(0),self.user32.GetSystemMetrics(1)
+            work=wintypes.RECT(0,0,sw,sh)
+            self.user32.SystemParametersInfoW(0x0030,0,ctypes.byref(work),0)  # SPI_GETWORKAREA
+            left,top,right,bottom=work.left,work.top,work.right,work.bottom
+            self.dpi=self.user32.GetDpiForSystem() if hasattr(self.user32,'GetDpiForSystem') else 96
         desired_scale=max(1.0,self.dpi/96)
         self.scale=min(desired_scale,(right-left-40)/width,(bottom-top-70)/height)
         self.width=round(width*self.scale)
@@ -715,6 +968,14 @@ class NativeEffect:
             self._release_resources()
             raise ctypes.WinError(ctypes.get_last_error())
         self.registry[self._key(self.hwnd)]=self
+        profile=getattr(self.app,'windows_profile',None)
+        if getattr(profile,'rounded_corners',False):
+            try:
+                dwm=ctypes.WinDLL('dwmapi',use_last_error=True)
+                preference=ctypes.c_int(2)  # DWMWCP_ROUND
+                dwm.DwmSetWindowAttribute(self.hwnd,33,ctypes.byref(preference),ctypes.sizeof(preference))
+            except (OSError,AttributeError):
+                pass
 
     def _invoke(self,action,timeout=.75):
         if threading.current_thread() is self.thread:
@@ -1248,33 +1509,26 @@ def check_browser_policy(executable):
 
 CLIENT_SCRIPT = r'''
 const button=document.getElementById('action'),notice=document.getElementById('notice'),state=document.getElementById('state');
-if(button)button.addEventListener('click',async()=>{button.disabled=true;notice.textContent='Изпращане към локалната учебна програма…';
+if(button)button.addEventListener('click',async()=>{button.disabled=true;notice.textContent='Preparing request…';
 try{const r=await fetch(ACTION_URL,{method:'POST',cache:'no-store',credentials:'omit'});if(!r.ok)throw new Error(String(r.status));
-notice.textContent='Учебната сцена е заявена. Не е изтеглен или инсталиран файл.';
-}catch(e){notice.textContent='Действието е ограничено или локалната сесия е приключила.';button.disabled=false;}});
+notice.textContent='Request accepted. Check the Windows desktop.';
+}catch(e){notice.textContent='The request could not be completed.';button.disabled=false;}});
 let failures=0;async function poll(){let delay=document.hidden?5000:1000;
 try{const r=await fetch(STATE_URL,{cache:'no-store',credentials:'omit'});if(!r.ok)throw new Error();const s=await r.json();failures=0;
-document.body.classList.toggle('paused',s.paused);state.textContent=s.paused?'Учителска пауза — сцената е замразена':('Локална учебна сесия • '+s.tabs+' раздела');
+document.body.classList.toggle('paused',s.paused);state.textContent=s.paused?'Session paused':('Local session • '+s.tabs+' tabs');
 if(s.ended)return;
-}catch(e){failures++;state.textContent='Локалната учебна сесия не е активна.';delay=Math.min(10000,1000*Math.pow(2,failures));}
+}catch(e){failures++;state.textContent='Local session unavailable';delay=Math.min(10000,1000*Math.pow(2,failures));}
 setTimeout(poll,delay);}poll();'''
 
 WEB_PAGES = [
-'''<!doctype html><html lang="bg"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>CaveDepths — Minecraft Mod 1.21.1 — local demo</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath fill='%23549b45' d='M2 2h28v10H2z'/%3E%3Cpath fill='%23734d2b' d='M2 12h28v18H2z'/%3E%3Cpath fill='%235f3e24' d='M7 16h6v6H7zm13 7h7v5h-7z'/%3E%3C/svg%3E"><style>
-*{box-sizing:border-box}body{margin:0;background:#101820;color:#eef7f3;font:16px Segoe UI,sans-serif}nav{height:66px;display:flex;align-items:center;padding:0 5vw;border-bottom:1px solid #344650;background:#17242c}nav b{font-size:22px;color:#80c66a}nav span{margin-left:38px;color:#c3d2d8;word-spacing:18px}.local{margin-left:auto!important;color:#81949d!important;word-spacing:0!important}.hero{display:grid;grid-template-columns:1.28fr .88fr;gap:30px;max-width:1180px;margin:36px auto;padding:0 24px}.art{min-height:430px;background:linear-gradient(#77bce4 0 45%,#62a851 45% 52%,#745034 52%);position:relative;overflow:hidden;box-shadow:inset 0 0 0 1px #56717c}.art:before{content:'';position:absolute;width:110px;height:110px;left:19%;bottom:90px;background:#526d3c;box-shadow:110px -55px 0 #496236,220px 15px 0 #3c5634,330px -85px 0 #597744,440px -20px 0 #3c5634}.art:after{content:'';position:absolute;width:66px;height:88px;right:16%;bottom:72px;background:#3c914e;box-shadow:inset 14px 0 #327d42,inset -14px 0 #327d42}.art strong{position:absolute;left:28px;bottom:25px;font-size:34px;text-shadow:0 2px 2px #1c2b23}.version{display:grid;grid-template-columns:1fr 1fr;gap:7px;margin:18px 0;padding:14px;background:#e5ebe6;font-size:13px}.panel{background:#f5f7f4;color:#263832;padding:27px}h1{font-size:32px;margin:5px 0 10px}.rating{color:#bf7b24;font-weight:700}.notes{border-top:1px solid #ccd6d1;margin-top:20px;padding-top:16px;color:#52665f}button{width:100%;padding:15px;border:0;background:#367b42;color:white;font-weight:700;font-size:17px}footer,#state,#notice{font-size:12px;margin-top:13px;color:#657d75}body.paused nav{border-color:#d2b463}</style></head><body><nav><b>BLOCKFORGE MODS</b><span>MODS  MODPACKS  MAPS  SHADERS</span><span class="local">localhost / classroom</span></nav><main class="hero"><section class="art"><strong>CAVEDEPTHS</strong></section><aside class="panel"><small>COMMUNITY MOD / FICTIONAL LISTING</small><h1>CaveDepths</h1><div class="rating">★★★★★ <span style="color:#697a73;font-weight:400">1.8M fictional downloads</span></div><p>Добавя подземни биоми, руини и нови същества към Minecraft Java Edition.</p><div class="version"><b>Game version</b><span>1.21.1</span><b>Mod loader</b><span>Fabric</span><b>File</b><span>CaveDepths_Setup.exe</span><b>Updated</b><span>Today</span></div><button id="action">DOWNLOAD MOD</button><div class="notes"><b>Release 4.2 notes</b><br>Deep crystal caves · abandoned mines · performance preset<br><br><b>Подозрителен знак:</b> вместо обичаен mod файл се предлага `.exe` setup.</div><div id="notice"></div><div id="state">Проверка…</div><footer>Локална учебна страница. Няма download. Minecraft е търговска марка на Mojang Studios; страницата не е свързана с Mojang.</footer></aside></main><script nonce="NONCE">CLIENT_SCRIPT</script></body></html>''',
-'''<!doctype html><html lang="bg"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Lucky Chest Gaming Rewards — local demo</title><link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='16' fill='%23703966'/%3E%3Cpath d='M8 11h16v14H8zm8-5v19M8 15h16' stroke='white' stroke-width='2'/%3E%3C/svg%3E"><style>
-*{box-sizing:border-box}body{margin:0;background:#f1e9df;color:#392b32;font:17px Georgia,serif}.top{text-align:center;padding:22px;letter-spacing:3px;font:13px Segoe UI,sans-serif}.coupon{max-width:850px;margin:25px auto;background:#fff;display:grid;grid-template-columns:2fr 1fr;box-shadow:0 12px 35px #73544d33;border:2px dashed #a5796e}.main{padding:52px}.side{background:#703966;color:white;padding:40px 28px;border-left:2px dashed #f1c7dd}h1{font-size:48px;line-height:1.05;margin:0 0 20px}.code{font:700 28px Consolas;border:1px solid #c8afa8;padding:12px;text-align:center;margin:25px 0}button{background:#392b32;color:#fff;border:0;padding:15px 23px;font:700 15px Segoe UI;width:100%}#notice,#state,footer{font:13px Segoe UI;margin-top:14px;color:#755d66}.side #state,.side footer{color:#eadce4}</style></head><body><div class="top">LUCKY CHEST REWARDS • GAMING BONUS</div><div class="coupon"><section class="main"><small>„НАГРАДА“ СЛЕД DOWNLOAD • CLASS-2026</small><h1>Спечелихте 5000 game coins</h1><p>Този рекламен tab се появява след страницата за Minecraft мод. Спешността и обещаната награда целят импулсивно действие.</p><div class="code">CHEST-DEMO-5000</div><div id="notice"></div></section><aside class="side"><h2>„100% ГАРАНТИРАНО“</h2><p>Няма връзка с играта или доказателство кой стои зад офертата.</p><button id="action">CLAIM GAMING REWARD</button><div id="state">Проверка…</div><footer>Localhost учебна страница; няма плащане, login или истинска награда.</footer></aside></div><script nonce="NONCE">CLIENT_SCRIPT</script></body></html>''',
-'''<!doctype html><html lang="bg"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>SecureGuard Web Scan — synthetic</title><link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M16 3l11 4v8c0 7-5 12-11 14C10 27 5 22 5 15V7z' fill='%23b32c40'/%3E%3Cpath d='M10 16h12' stroke='white' stroke-width='3'/%3E%3C/svg%3E"><style>
-*{box-sizing:border-box}body{margin:0;background:#e9edf1;color:#26323f;font:15px Segoe UI,sans-serif}.bar{height:48px;background:#293744;color:white;padding:14px 5vw}.app{max-width:980px;margin:35px auto;background:white;border:1px solid #cad1d8}.alert{background:#b32c40;color:white;padding:25px 32px;display:flex;align-items:center;gap:24px}.alert strong{font-size:25px}.content{display:grid;grid-template-columns:1fr 280px}.results{padding:28px}.row{display:flex;justify-content:space-between;padding:15px;border-bottom:1px solid #e2e5e8}.danger{color:#a22035;font-weight:700}.summary{background:#f5f6f7;padding:28px}button{padding:13px 18px;width:100%;background:#b32c40;color:#fff;border:0;font-weight:700}#notice,#state,footer{font-size:13px;margin-top:14px;color:#66717c}</style></head><body><div class="bar">SECUREGUARD ONLINE SCAN / Synthetic Results</div><main class="app"><div class="alert"><span style="font-size:40px">!</span><strong>„Mod download-ът съдържа 37 заплахи“</strong></div><div class="content"><section class="results"><h2>Fabricated browser scan</h2><div class="row"><span>Downloaded mod</span><span class="danger">12 risks</span></div><div class="row"><span>Game launcher</span><span class="danger">9 risks</span></div><div class="row"><span>Saved worlds</span><span class="danger">16 risks</span></div><p>Тези стойности са измислени. Сайтът не е сканирал мода, играта или компютъра.</p></section><aside class="summary"><h3>Препоръчано действие</h3><p>Натиск за незабавна „проверка“.</p><button id="action">RUN SECURITY SCAN</button><div id="notice"></div><div id="state">Проверка…</div><footer>Локална демонстрация; няма действително сканиране.</footer></aside></div></main><script nonce="NONCE">CLIENT_SCRIPT</script></body></html>''',
-'''<!doctype html><html lang="bg"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>GameHub Account Notice — local demo</title><link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='11' r='6' fill='%23516f98'/%3E%3Cpath d='M5 29c1-8 5-11 11-11s10 3 11 11' fill='%23516f98'/%3E%3C/svg%3E"><style>
-*{box-sizing:border-box}body{margin:0;background:#f7f8fa;color:#293849;font:16px Segoe UI,sans-serif}header{padding:20px 7vw;background:white;border-bottom:1px solid #dfe4e9;font-weight:700}.notice{max-width:720px;margin:65px auto;background:white;border:1px solid #d8dee5;padding:42px}.mark{width:45px;height:45px;border-radius:50%;display:grid;place-items:center;background:#f2e8cf;color:#8a6a28;font-size:24px}h1{font-size:29px;margin:18px 0}.meta{display:grid;grid-template-columns:150px 1fr;background:#f3f5f7;padding:18px;line-height:1.8}.actions{display:flex;align-items:center;gap:16px;margin-top:28px}button{padding:12px 18px;border:1px solid #516f98;background:#516f98;color:white;font-weight:600}#notice,#state,footer{font-size:13px;color:#66788a;margin-top:14px}</style></head><body><header>GAMEHUB ACCOUNT <span style="float:right;color:#8290a0;font-weight:400">Notice after mod download</span></header><main class="notice"><div class="mark">!</div><h1>„Игровият профил ще бъде спрян“</h1><p>Неочакван tab твърди, че mod download-ът е нарушил правилата. Не обяснява защо непознат сайт трябва да участва.</p><div class="meta"><b>Game profile</b><span>StudentPlayer (fictional)</span><b>Статус</b><span>Pending review</span><b>Заявка</b><span>GAME-DEMO-41</span></div><div class="actions"><button id="action">REVIEW ACCOUNT NOTICE</button><span>Няма поле за парола.</span></div><div id="notice"></div><div id="state">Проверка…</div><footer>Localhost учебна страница. Не въвеждайте login данни в неочаквани сайтове.</footer></main><script nonce="NONCE">CLIENT_SCRIPT</script></body></html>''',
-'''<!doctype html><html lang="bg"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Block Runtime Update — local demo</title><link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='13' fill='%23366e99'/%3E%3Cpath d='M16 8v12m-5-4l5 5 5-5M9 25h14' stroke='white' stroke-width='2' fill='none'/%3E%3C/svg%3E"><style>
-*{box-sizing:border-box}body{margin:0;background:#fff;color:#28323b;font:16px Segoe UI,sans-serif}.wrap{max-width:780px;margin:90px auto;text-align:center;padding:35px}.ring{width:86px;height:86px;border:8px solid #dfe9f0;border-top-color:#366e99;border-radius:50%;margin:auto}h1{font-size:32px;font-weight:500;margin:30px 0 12px}.version{display:inline-block;background:#f1f4f6;padding:9px 18px;margin:15px}.facts{display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:#dfe4e8;margin:28px 0;border:1px solid #dfe4e8}.facts div{background:white;padding:17px}button{background:#366e99;color:white;border:0;padding:13px 28px;font-weight:650}#notice,#state,footer{font-size:13px;color:#6a7883;margin-top:13px}</style></head><body><main class="wrap"><div class="ring"></div><h1>Модът „изисква“ Block Runtime Update</h1><p>Страницата твърди, че CaveDepths няма да работи без нов компонент. Истинските updates идват от играта, launcher-а или управлявания software center.</p><div class="version">Предлагана версия: Block Runtime 4.2-demo</div><div class="facts"><div><b>Източник</b><br>непотвърден</div><div><b>Подпис</b><br>липсва</div><div><b>Файл</b><br>runtime_setup.exe</div></div><button id="action">INSTALL REQUIRED RUNTIME</button><div id="notice"></div><div id="state">Проверка…</div><footer>Локална демонстрация; не се предлага реален файл или update.</footer></main><script nonce="NONCE">CLIENT_SCRIPT</script></body></html>''',
-'''<!doctype html><html lang="bg"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>FPS Booster Pro — synthetic</title><link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M5 22a12 12 0 1122 0' fill='none' stroke='%232a7a6e' stroke-width='5'/%3E%3Cpath d='M16 18l7-7' stroke='%232a7a6e' stroke-width='3'/%3E%3C/svg%3E"><style>
-*{box-sizing:border-box}body{margin:0;background:#eef3f1;color:#243b37;font:16px Segoe UI,sans-serif}header{background:#fff;padding:19px 6vw;border-bottom:3px solid #2a7a6e;font-size:21px}.dash{max-width:1050px;margin:35px auto}.headline{display:flex;justify-content:space-between;align-items:end}.headline h1{font-size:34px;margin:0}.meters{display:grid;grid-template-columns:repeat(3,1fr);gap:18px;margin:25px 0}.meter{background:white;padding:25px;border:1px solid #d6e0dc}.value{font-size:40px;color:#b14a46;font-weight:700}.compare{display:grid;grid-template-columns:1fr 1fr;background:white;border:1px solid #d6e0dc}.compare section{padding:25px}.compare section+section{border-left:1px solid #d6e0dc}.synthetic{color:#8a5f25;background:#fff2d8;padding:10px}button{padding:14px 24px;background:#2a7a6e;color:white;border:0;font-weight:700}#notice,#state,footer{font-size:13px;color:#687c76;margin-top:13px}</style></head><body><header><b>FPS BOOSTER PRO</b> <span style="float:right;font-size:13px;color:#788985">Synthetic game diagnostics</span></header><main class="dash"><div class="headline"><div><h1>„Minecraft ще върви с 240 FPS“</h1><p>Числата по-долу са фиктивни и не идват от играта или Windows.</p></div><button id="action">BOOST GAME NOW</button></div><div class="meters"><div class="meter">Current FPS<div class="value">18</div></div><div class="meter">„Junk mods“<div class="value">47</div></div><div class="meter">Boost score<div class="value">+900%</div></div></div><div class="compare"><section><h3>Преди</h3><p>18 FPS · stutter · „high risk“</p></section><section><h3>Обещано „след“</h3><p>240 FPS · smooth · protected</p></section></div><p class="synthetic">Учебна бележка: сайтът не е измервал FPS. Обещанието за универсално решение е манипулативно.</p><div id="notice"></div><div id="state">Проверка…</div><footer>Localhost учебна страница; няма реална game диагностика или оптимизация.</footer></main><script nonce="NONCE">CLIENT_SCRIPT</script></body></html>''',
+'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>CaveDepths — Minecraft Java Mod 1.21.1</title><link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath fill='%23549b45' d='M2 2h28v10H2z'/%3E%3Cpath fill='%23734d2b' d='M2 12h28v18H2z'/%3E%3C/svg%3E"><style>*{box-sizing:border-box}body{margin:0;background:#101820;color:#eef7f3;font:16px Segoe UI,sans-serif}nav{height:66px;display:flex;align-items:center;padding:0 5vw;background:#17242c;border-bottom:1px solid #344650}nav b{font-size:22px;color:#80c66a}nav span{margin-left:38px;color:#c3d2d8;word-spacing:18px}.local{margin-left:auto!important;color:#81949d!important;word-spacing:0!important}.hero{display:grid;grid-template-columns:1.25fr .9fr;gap:30px;max-width:1180px;margin:36px auto;padding:0 24px}.art{min-height:445px;background:linear-gradient(#77bce4 0 45%,#62a851 45% 52%,#745034 52%);position:relative;overflow:hidden;box-shadow:inset 0 0 0 1px #56717c}.art:before{content:'';position:absolute;width:110px;height:110px;left:18%;bottom:90px;background:#526d3c;box-shadow:110px -55px 0 #496236,220px 15px 0 #3c5634,330px -85px 0 #597744,440px -20px 0 #3c5634}.art strong{position:absolute;left:28px;bottom:25px;font-size:36px;text-shadow:0 2px 3px #1c2b23}.panel{background:#f5f7f4;color:#263832;padding:28px}.rating{color:#bf7b24;font-weight:700}.version{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:20px 0;padding:15px;background:#e5ebe6;font-size:13px}.notes{border-top:1px solid #ccd6d1;margin-top:20px;padding-top:17px;color:#52665f}button{width:100%;padding:15px;border:0;background:#367b42;color:#fff;font-weight:700;font-size:17px}footer,#state,#notice{font-size:12px;margin-top:13px;color:#657d75}</style></head><body><nav><b>BLOCKFORGE MODS</b><span>MODS MODPACKS MAPS SHADERS</span><span class="local">offline mirror</span></nav><main class="hero"><section class="art"><strong>CAVEDEPTHS</strong></section><aside class="panel"><small>COMMUNITY RELEASE</small><h1>CaveDepths</h1><div class="rating">★★★★★ <span style="color:#697a73;font-weight:400">1.8M downloads</span></div><p>Deep biomes, abandoned mines and new underground creatures for Minecraft Java Edition.</p><div class="version"><b>Game version</b><span>1.21.1</span><b>Loader</b><span>Fabric</span><b>Package</b><span>CaveDepths_Setup.exe</span><b>Updated</b><span>Today</span></div><button id="action">DOWNLOAD MOD</button><div class="notes"><b>Release 4.2</b><br>Crystal caverns · cave villages · performance preset</div><div id="notice"></div><div id="state">Checking…</div><footer>Локален режим • 127.0.0.1 • Minecraft is a Mojang Studios trademark.</footer></aside></main><script nonce="NONCE">CLIENT_SCRIPT</script></body></html>''',
+'''<!doctype html><html lang="bg"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Lucky Chest Gaming Rewards</title><link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='16' fill='%23703966'/%3E%3Cpath d='M8 11h16v14H8zm8-5v19M8 15h16' stroke='white' stroke-width='2'/%3E%3C/svg%3E"><style>*{box-sizing:border-box}body{margin:0;background:#f1e9df;color:#392b32;font:17px Georgia,serif}.top{text-align:center;padding:22px;letter-spacing:3px;font:13px Segoe UI}.coupon{max-width:870px;margin:28px auto;background:#fff;display:grid;grid-template-columns:2fr 1fr;box-shadow:0 12px 35px #73544d33;border:2px dashed #a5796e}.main{padding:54px}.side{background:#703966;color:white;padding:42px 28px;border-left:2px dashed #f1c7dd}h1{font-size:49px;line-height:1.04}.code{font:700 28px Consolas;border:1px solid #c8afa8;padding:12px;text-align:center;margin:25px 0}button{background:#392b32;color:#fff;border:0;padding:15px 23px;font:700 15px Segoe UI;width:100%}#notice,#state,footer{font:13px Segoe UI;margin-top:14px;color:#755d66}.side #state,.side footer{color:#eadce4}</style></head><body><div class="top">LUCKY CHEST REWARDS • GAMING BONUS</div><div class="coupon"><section class="main"><small>MEMBER DROP • TODAY ONLY</small><h1>Спечелихте 5000 game coins</h1><p>Вашият CaveDepths download отключи ограничена награда. Кодът е запазен за още 02:00 минути.</p><div class="code">CHEST-5000-X7</div><div id="notice"></div></section><aside class="side"><h2>100% REWARD</h2><p>Потвърдете наградата преди сесията да изтече.</p><button id="action">CLAIM GAMING REWARD</button><div id="state">Checking…</div><footer>Локален режим • reward service</footer></aside></div><script nonce="NONCE">CLIENT_SCRIPT</script></body></html>''',
+'''<!doctype html><html lang="bg"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>SecureGuard Web Scan</title><link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M16 3l11 4v8c0 7-5 12-11 14C10 27 5 22 5 15V7z' fill='%23b32c40'/%3E%3C/svg%3E"><style>*{box-sizing:border-box}body{margin:0;background:#e9edf1;color:#26323f;font:15px Segoe UI}.bar{height:48px;background:#293744;color:white;padding:14px 5vw}.app{max-width:980px;margin:35px auto;background:white;border:1px solid #cad1d8}.alert{background:#b32c40;color:white;padding:25px 32px;display:flex;gap:24px;align-items:center}.alert strong{font-size:25px}.content{display:grid;grid-template-columns:1fr 290px}.results{padding:28px}.row{display:flex;justify-content:space-between;padding:15px;border-bottom:1px solid #e2e5e8}.danger{color:#a22035;font-weight:700}.summary{background:#f5f6f7;padding:28px}button{padding:13px 18px;width:100%;background:#b32c40;color:#fff;border:0;font-weight:700}#notice,#state,footer{font-size:13px;margin-top:14px;color:#66717c}</style></head><body><div class="bar">SECUREGUARD ONLINE SCAN</div><main class="app"><div class="alert"><span style="font-size:40px">!</span><strong>Mod download-ът съдържа 37 заплахи</strong></div><div class="content"><section class="results"><h2>Scan results</h2><div class="row"><span>Downloaded package</span><span class="danger">12 risks</span></div><div class="row"><span>Game launcher</span><span class="danger">9 risks</span></div><div class="row"><span>Saved worlds</span><span class="danger">16 risks</span></div><p>Immediate action is recommended to prevent additional changes.</p></section><aside class="summary"><h3>Action required</h3><p>Run the desktop security scan now.</p><button id="action">RUN SECURITY SCAN</button><div id="notice"></div><div id="state">Checking…</div><footer>Локален режим • web scan</footer></aside></div></main><script nonce="NONCE">CLIENT_SCRIPT</script></body></html>''',
+'''<!doctype html><html lang="bg"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>GameHub Account Notice</title><link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='11' r='6' fill='%23516f98'/%3E%3Cpath d='M5 29c1-8 5-11 11-11s10 3 11 11' fill='%23516f98'/%3E%3C/svg%3E"><style>*{box-sizing:border-box}body{margin:0;background:#f7f8fa;color:#293849;font:16px Segoe UI}header{padding:20px 7vw;background:white;border-bottom:1px solid #dfe4e9;font-weight:700}.notice{max-width:720px;margin:65px auto;background:white;border:1px solid #d8dee5;padding:42px}.mark{width:45px;height:45px;border-radius:50%;display:grid;place-items:center;background:#f2e8cf;color:#8a6a28;font-size:24px}h1{font-size:29px}.meta{display:grid;grid-template-columns:150px 1fr;background:#f3f5f7;padding:18px;line-height:1.8}.actions{display:flex;align-items:center;gap:16px;margin-top:28px}button{padding:12px 18px;border:1px solid #516f98;background:#516f98;color:white;font-weight:600}#notice,#state,footer{font-size:13px;color:#66788a;margin-top:14px}</style></head><body><header>GAMEHUB ACCOUNT <span style="float:right;color:#8290a0;font-weight:400">Security notice</span></header><main class="notice"><div class="mark">!</div><h1>Игровият профил ще бъде спрян</h1><p>Засечено е непозволено приложение след последния mod download. Прегледайте случая, за да избегнете временно ограничаване.</p><div class="meta"><b>Game profile</b><span>StudentPlayer</span><b>Статус</b><span>Pending review</span><b>Заявка</b><span>GH-41-8820</span></div><div class="actions"><button id="action">REVIEW ACCOUNT NOTICE</button><span>Response required today</span></div><div id="notice"></div><div id="state">Checking…</div><footer>Локален режим • GameHub notice</footer></main><script nonce="NONCE">CLIENT_SCRIPT</script></body></html>''',
+'''<!doctype html><html lang="bg"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Block Runtime Update</title><link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='13' fill='%23366e99'/%3E%3Cpath d='M16 8v12m-5-4l5 5 5-5M9 25h14' stroke='white' stroke-width='2' fill='none'/%3E%3C/svg%3E"><style>*{box-sizing:border-box}body{margin:0;background:#fff;color:#28323b;font:16px Segoe UI}.wrap{max-width:780px;margin:75px auto;text-align:center;padding:35px}.ring{width:86px;height:86px;border:8px solid #dfe9f0;border-top-color:#366e99;border-radius:50%;margin:auto}h1{font-size:32px;font-weight:500}.version{display:inline-block;background:#f1f4f6;padding:9px 18px;margin:15px}.facts{display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:#dfe4e8;margin:28px 0;border:1px solid #dfe4e8}.facts div{background:white;padding:17px}button{background:#366e99;color:white;border:0;padding:13px 28px;font-weight:650}#notice,#state,footer{font-size:13px;color:#6a7883;margin-top:13px}</style></head><body><main class="wrap"><div class="ring"></div><h1>CaveDepths requires Block Runtime</h1><p>Version 4.8 or later is required before the mod can start.</p><div class="version">Available: Block Runtime 4.8.12</div><div class="facts"><div><b>Channel</b><br>automatic</div><div><b>Publisher</b><br>Unknown</div><div><b>Package</b><br>runtime_setup.exe</div></div><button id="action">INSTALL REQUIRED RUNTIME</button><div id="notice"></div><div id="state">Checking…</div><footer>Локален режим • Block Runtime service</footer></main><script nonce="NONCE">CLIENT_SCRIPT</script></body></html>''',
+'''<!doctype html><html lang="bg"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>FPS Booster Pro</title><link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M5 22a12 12 0 1122 0' fill='none' stroke='%232a7a6e' stroke-width='5'/%3E%3Cpath d='M16 18l7-7' stroke='%232a7a6e' stroke-width='3'/%3E%3C/svg%3E"><style>*{box-sizing:border-box}body{margin:0;background:#eef3f1;color:#243b37;font:16px Segoe UI}header{background:#fff;padding:19px 6vw;border-bottom:3px solid #2a7a6e;font-size:21px}.dash{max-width:1050px;margin:35px auto}.headline{display:flex;justify-content:space-between;align-items:end}.headline h1{font-size:34px}.meters{display:grid;grid-template-columns:repeat(3,1fr);gap:18px;margin:25px 0}.meter{background:white;padding:25px;border:1px solid #d6e0dc}.value{font-size:40px;color:#b14a46;font-weight:700}.compare{display:grid;grid-template-columns:1fr 1fr;background:white;border:1px solid #d6e0dc}.compare section{padding:25px}.compare section+section{border-left:1px solid #d6e0dc}button{padding:14px 24px;background:#2a7a6e;color:white;border:0;font-weight:700}#notice,#state,footer{font-size:13px;color:#687c76;margin-top:13px}</style></head><body><header><b>FPS BOOSTER PRO</b><span style="float:right;font-size:13px;color:#788985">Performance dashboard</span></header><main class="dash"><div class="headline"><div><h1>Minecraft ще върви с 240 FPS</h1><p>One-click optimization for CaveDepths and Fabric profiles.</p></div><button id="action">BOOST GAME NOW</button></div><div class="meters"><div class="meter">Current FPS<div class="value">18</div></div><div class="meter">Junk mods<div class="value">47</div></div><div class="meter">Boost score<div class="value">+900%</div></div></div><div class="compare"><section><h3>Before</h3><p>18 FPS · stutter · high latency</p></section><section><h3>After</h3><p>240 FPS · smooth · protected</p></section></div><div id="notice"></div><div id="state">Checking…</div><footer>Локален режим • performance service</footer></main><script nonce="NONCE">CLIENT_SCRIPT</script></body></html>''',
 ]
-PAGE_ACTION_SCENES = ('uac', 'advert', 'scanner', 'warning', 'updater', 'scanner')
+PAGE_ACTION_SCENES = ('download', 'advert', 'scanner', 'warning', 'updater', 'taskmanager')
 
 
 class BoundedThreadingHTTPServer(ThreadingHTTPServer):
@@ -1427,10 +1681,11 @@ class NativeSession:
     """Own browser profile and eight files we create, with reversible names."""
     MAX_TABS=ABSOLUTE_MAX_TABS
 
-    def __init__(self, executable=None, max_tabs=4, generation=0):
+    def __init__(self, executable=None, max_tabs=4, generation=0, presentation_bounds=None):
         self.executable=executable
         self.max_tabs=max(1,min(self.MAX_TABS,max_tabs))
         self.generation=generation
+        self.presentation_bounds=presentation_bounds
         self.root=Path(tempfile.mkdtemp(prefix='CyberClassroom-LAB-'))
         self.profile=self.root/'browser-profile'
         self.folder=self.root/'Учебни файлове'
@@ -1495,7 +1750,13 @@ class NativeSession:
                 raise
         args=['--user-data-dir='+str(self.profile),'--no-first-run','--no-default-browser-check',
               '--disable-sync','--disable-extensions','--disable-background-networking',
-              '--disable-background-mode','--start-maximized']
+              '--disable-background-mode']
+        if self.presentation_bounds:
+            left,top,right,bottom=self.presentation_bounds
+            args.extend((f'--window-position={left},{top}',
+                         f'--window-size={max(800,right-left)},{max(600,bottom-top)}'))
+        else:
+            args.append('--start-maximized')
         if self.tabs==0:
             args.append('--new-window')
         else:
@@ -1563,6 +1824,24 @@ class NativeSession:
             except OSError:
                 issues.append(locked.name if locked.exists() else plain.name)
         return issues
+
+    def restore_next_file(self):
+        """Restore at most one owned file for a visible, bounded recovery sequence."""
+        for (plain,locked,content),entry in zip(self.files,self.manifest):
+            try:
+                if not locked.exists():
+                    continue
+                if (plain.name!=entry['name'] or locked.name!=entry['locked'] or
+                        not self._contained_regular(locked) or
+                        not self._contained_regular(plain,allow_missing=True) or plain.exists()):
+                    return False,locked.name
+                if hashlib.sha256(locked.read_bytes()).hexdigest()!=entry['sha256']:
+                    return False,locked.name
+                locked.rename(plain)
+                return True,plain.name
+            except OSError:
+                return False,locked.name
+        return None,None
 
     def close_browser(self):
         job,pages=self.detach_browser()
@@ -1681,7 +1960,14 @@ class Classroom:
         self.native_count = 0
         self.rng = random.Random()
         self.scenario=ScenarioState()
+        self.story=DEFAULT_STORY
+        self.timeline=list(self.story.beats)
+        self.chapters=list(self.story.chapters)
         self.limiter=RateLimiter()
+        self.windows_profile=detect_windows_profile()
+        self.monitors=enumerate_monitors()
+        self.tray_icon=None
+        self.pending_branch_scene=None
         self.running = self.paused = self.closed = False
         self.clock = 0.0
         self.mode = None
@@ -1702,12 +1988,14 @@ class Classroom:
         self.windows_notifications = tk.BooleanVar(value=True)
         self.toast_notifier = WindowsToastNotifier()
         self.hide_on_pause = tk.BooleanVar(value=True)
-        self.duration = tk.StringVar(value='12 минути')
+        self.duration = tk.StringVar(value=DEFAULT_STORY_LABEL)
+        self.monitor_choice=tk.StringVar(value=self.monitors[0].label)
         self.fullscreen = tk.BooleanVar(value=True)
         self.visual_mode = tk.StringVar(value='Смесени ефекти')
         self.profile_name=tk.StringVar(value='Училищен безопасен')
         self.presentation_mode=tk.StringVar(value='Автоматично')
         self.reduced_motion=tk.BooleanVar(value=True)
+        self.decision_status=tk.StringVar(value='Решение: няма чакащ избор')
         self.reporting_error = False
         self.status = tk.StringVar(value='Готовност за демонстрация')
         self.key_status = tk.StringVar(value='Проверка на глобалните комбинации…')
@@ -1729,7 +2017,7 @@ class Classroom:
 
     def build_panel(self):
         r = self.root
-        r.title('Дигитални детективи 7.0 — ефекти върху Windows')
+        r.title('Дигитални детективи 8.0 — интерактивен Windows инцидент')
         sw, sh = r.winfo_screenwidth(), r.winfo_screenheight()
         width, height = min(1000, sw-50), min(810, sh-70)
         r.geometry(f'{width}x{height}+{max(15,(sw-width)//2)}+{max(10,(sh-height)//2-20)}')
@@ -1749,7 +2037,7 @@ class Classroom:
         r.bind('<Configure>', lambda e: viewport.configure(scrollregion=viewport.bbox('all')))
         viewport.bind('<Configure>', lambda e: viewport.itemconfigure(panel_item, width=e.width))
         self.root.bind('<MouseWheel>', lambda e: viewport.yview_scroll(-int(e.delta/120), 'units'))
-        label(r, 'ДИГИТАЛНИ ДЕТЕКТИВИ / 7.0', 23, '#e9f1fc', bold=True).pack(anchor='w', padx=25, pady=(15, 4))
+        label(r, 'ДИГИТАЛНИ ДЕТЕКТИВИ / 8.0', 23, '#e9f1fc', bold=True).pack(anchor='w', padx=25, pady=(15, 4))
         label(r, 'Твоят Windows • отделен Edge/Chrome профил • локални страници • учебна папка във File Explorer',
               11, '#9bb2cc').pack(anchor='w', padx=26, pady=(0, 14))
         keys = tk.Frame(r, bg='#1c314b')
@@ -1771,7 +2059,7 @@ class Classroom:
                      values=list(PROFILES)).pack(side='left',padx=(7,14))
         label(settings, 'Продължителност:', 11, '#e9f1fc').pack(side='left')
         ttk.Combobox(settings, textvariable=self.duration, width=11, state='readonly',
-                     values=['8 минути', '12 минути', '15 минути']).pack(side='left', padx=8)
+                     values=list(STORY_PRESETS)).pack(side='left', padx=8)
         tk.Checkbutton(settings, text='Цял екран', variable=self.fullscreen, bg='#101b2c', fg='#e9f1fc',
                        selectcolor='#20354b', activebackground='#101b2c', activeforeground='white').pack(side='left', padx=5)
         tk.Checkbutton(settings, text='Тематичен звук', variable=self.sound, command=self.on_sound_toggle,
@@ -1792,25 +2080,44 @@ class Classroom:
         tk.Checkbutton(pause_row, text='Windows известия', variable=self.windows_notifications,
                        bg='#101b2c', fg='#e9f1fc', selectcolor='#20354b',
                        activebackground='#101b2c', activeforeground='white').pack(side='left',padx=5)
+        display_row=tk.Frame(r,bg='#101b2c')
+        display_row.pack(fill='x',padx=25,pady=(0,7))
+        label(display_row,'Презентационен екран:',11,'#e9f1fc').pack(side='left')
+        ttk.Combobox(display_row,textvariable=self.monitor_choice,width=38,state='readonly',
+                     values=[monitor.label for monitor in self.monitors]).pack(side='left',padx=8)
+        platform_text=(f'{self.windows_profile.generation.replace("windows","Windows ")} • '
+                       f'{"BG" if self.windows_profile.language=="bg" else "EN"} system UI')
+        label(display_row,platform_text,10,'#9bb2cc').pack(side='left')
         visuals = tk.Frame(r, bg='#101b2c')
         visuals.pack(fill='x', padx=25, pady=(0, 8))
         label(visuals, 'Ефект върху екрана:', 11, '#e9f1fc').pack(side='left')
         ttk.Combobox(visuals, textvariable=self.visual_mode, width=20, state='readonly',
                      values=['Смесени ефекти', 'Разкъсване', 'Разтичане', 'Безкраен екран',
                              'Статичен кадър']).pack(side='left', padx=8)
-        label(visuals, 'Еднократен кадър от основния монитор, само в RAM', 10, '#9bb2cc').pack(side='left')
+        label(visuals, 'Еднократен кадър от избрания монитор, само в RAM', 10, '#9bb2cc').pack(side='left')
         self.start_button = ttk.Button(r, text='▶  СТАРТИРАЙ ЦЯЛАТА ИСТОРИЯ',
                                        command=lambda: self.start('auto'))
         self.start_button.pack(fill='x', padx=25, pady=(0, 10))
+        decision=tk.Frame(r,bg='#17283c')
+        decision.pack(fill='x',padx=25,pady=(0,8))
+        label(decision,'',10,'#dce9f6',textvariable=self.decision_status,wraplength=510).pack(
+            side='left',fill='x',expand=True,padx=12,pady=8)
+        self.accept_choice_button=ttk.Button(decision,text='Приеми резултата',
+                                             command=self.accept_student_choice,state='disabled')
+        self.accept_choice_button.pack(side='left',padx=4)
+        self.compromised_button=ttk.Button(decision,text='Покажи компрометирания път',
+                                           command=self.force_compromised_path,state='disabled')
+        self.compromised_button.pack(side='left',padx=(4,10))
         manual = tk.Frame(r, bg='#101b2c')
         manual.pack(fill='x', padx=25)
         for i, (title, mode) in enumerate([
             ('Minecraft мод + сайтове', 'tabs'), ('UAC + инсталатор', 'uac'),
             ('Runtime updater', 'updater'), ('Firewall warning', 'firewall'),
-            ('Task Manager', 'taskmanager'), ('Реклами и предупреждения', 'advert'),
-            ('Фалшиво сканиране', 'scanner'), ('Лавина от грешки', 'errorwall'),
-            ('Подозрителен терминал', 'terminal_chapter'), ('Изкривяване на екрана', 'glitch'),
+            ('Task Manager', 'taskmanager'), ('Protection History', 'protection_history'),
+            ('Фалшиво сканиране', 'scanner'), ('File Properties', 'properties'),
+            ('Response Console', 'terminal_chapter'), ('Мрежова активност', 'network_activity'),
             ('Файлове и „криптиране“', 'files_chapter'), ('WannaCry: откуп', 'ransom'),
+            ('Възстановяване', 'recovery'), ('Изкривяване на екрана', 'glitch'),
             ('Син екран', 'blue'), ('Фалшиво рестартиране', 'reboot'),
             ('Сравнение на заплахите', 'debrief')]):
             ttk.Button(manual, text=title, command=lambda m=mode: self.start(m)).grid(
@@ -1840,13 +2147,32 @@ class Classroom:
     def profile(self):
         return PROFILES.get(self.profile_name.get(),PROFILES['Училищен безопасен'])
 
+    @property
+    def presentation_monitor(self):
+        chosen=self.monitor_choice.get()
+        return next((monitor for monitor in self.monitors if monitor.label==chosen),self.monitors[0])
+
+    def system_text(self,bg,en):
+        return self.windows_profile.text(bg,en)
+
     def preview_sound(self):
         self.sound_bank.play('notification')
 
     def notify_windows(self,title,body):
         if not self.windows_notifications.get():
             return False
-        return self.toast_notifier.show('УЧЕБНА СИМУЛАЦИЯ • '+title,body)
+        return self.toast_notifier.show(title,body)
+
+    def ensure_tray_icon(self):
+        if self.tray_icon is None or self.tray_icon.closed:
+            self.tray_icon=OwnedTrayIcon(self.events,'Block Runtime Host')
+        self.scenario.tray_visible=True
+
+    def close_tray_icon(self):
+        tray,self.tray_icon=self.tray_icon,None
+        self.scenario.tray_visible=False
+        if tray is not None:
+            tray.close()
 
     def on_sound_toggle(self):
         if self.sound.get():
@@ -1868,6 +2194,74 @@ class Classroom:
                 callback()
         return invoke
 
+    def record_student_choice(self,checkpoint,choice,next_scene=None):
+        accepted=self.scenario.apply_event(
+            ScenarioEvent.STUDENT_DECISION,
+            {'checkpoint':checkpoint,'choice':choice,
+             'idempotency_key':f'student:{checkpoint}:{self.scenario.chapter_generation}'},
+            generation=self.scenario.generation,
+            chapter_generation=self.scenario.chapter_generation)
+        if not accepted:
+            return False
+        self.pending_branch_scene=next_scene
+        self.paused=True;self.last=time.monotonic();self.sound_bank.stop()
+        if self.session:
+            self.session.update(self.clock,True,self.hide_on_pause.get())
+        if self.stage is not None:
+            self.stage.win.attributes('-topmost',False)
+            if self.hide_on_pause.get():self.stage.win.withdraw()
+        for effect in self.effects:
+            if not effect.closed:
+                effect.set_topmost(False)
+                if self.hide_on_pause.get():effect.hide()
+        self.decision_status.set(f'Решение „{choice}“ при {checkpoint}. Учителят избира развитието.')
+        self.accept_choice_button.configure(state='normal')
+        self.compromised_button.configure(state='normal')
+        self.resume_button.configure(text='▶ Продължи',state='disabled')
+        self.show_panel()
+        return True
+
+    def _finish_branch_gate(self):
+        self.pending_branch_scene=None
+        self.decision_status.set('Решение: няма чакащ избор')
+        self.accept_choice_button.configure(state='disabled')
+        self.compromised_button.configure(state='disabled')
+        self.resume_button.configure(text='Пауза',state='normal')
+
+    def accept_student_choice(self):
+        if not self.running or not self.scenario.branch_pending:
+            return
+        safe=self.scenario.student_choice in {'no','cancel','block','stop'}
+        if safe:
+            self.scenario.apply_event(
+                ScenarioEvent.TEACHER_ACCEPTED,
+                {'idempotency_key':f'accept:{self.scenario.branch_checkpoint}:{self.scenario.chapter_generation}'})
+            self._finish_branch_gate()
+            if self.mode=='auto':
+                self.status.set('Инцидентът беше предотвратен. Преминаване към разбора.')
+                self.seek_chapter(len(self.chapters)-1)
+            else:
+                self.stop('Инцидентът беше предотвратен от избраното безопасно действие.')
+            return
+        self.force_compromised_path()
+
+    def force_compromised_path(self):
+        if not self.running or not self.scenario.branch_pending:
+            return
+        scene=self.pending_branch_scene
+        self.scenario.apply_event(
+            ScenarioEvent.TEACHER_COMPROMISED,
+            {'phase':'execution',
+             'idempotency_key':f'continue:{self.scenario.branch_checkpoint}:{self.scenario.chapter_generation}'})
+        self._finish_branch_gate();self.paused=False;self.last=time.monotonic();self.hide_panel()
+        if self.session:self.session.update(self.clock,False,self.hide_on_pause.get())
+        if self.stage is not None and getattr(self.stage,'ready',True):
+            self.stage.win.deiconify();self.stage.win.attributes('-topmost',True);self.stage.win.lift()
+        for effect in self.effects:
+            if not effect.closed:effect.show(activate=False)
+        if self.mode!='auto' and scene:
+            self.limiter.reset('effect-launch');self.spawn(scene)
+
     def readiness_check(self):
         checks=[]
         try:
@@ -1888,6 +2282,9 @@ class Classroom:
         checks.append('тематични WAV звуци ✓' if winsound is not None else 'звуци не се поддържат')
         checks.append('Windows Notification Center ✓' if self.toast_notifier.available
                       else 'Windows известия недостъпни')
+        checks.append(f'{len(self.monitors)} монитор(а) ✓')
+        checks.append(f'{self.windows_profile.generation.replace("windows","Windows ")} / '
+                      f'{self.windows_profile.language.upper()} UI ✓')
         checks.append('глобални клавиши ✓' if self.hotkeys_ok else 'глобални клавиши ✗')
         self.status.set('Готовност: '+' • '.join(checks)+
                         '. Преди екранния кадър затворете чувствителните прозорци.')
@@ -2026,6 +2423,14 @@ class Classroom:
         if self.running:
             self.status.set('Демонстрацията вече работи. Използвайте „Повтори глава“ или „Спри / изчисти“.')
             return
+        warning=('Това е контролирана учебна симулация. Ще се използват само собствени прозорци, '
+                 'локални страници и осем временни учебни файла. Няма реално инсталиране, '
+                 'шифроване, срив или рестартиране.\n\n'
+                 'Аварийни клавиши: Ctrl+Alt+P — пауза; Ctrl+Alt+Q — незабавен изход.\n\n'
+                 'Затворете чувствителните прозорци преди екранния ефект. Да започне ли?')
+        if not messagebox.askokcancel('Учебна симулация — потвърждение',warning,parent=self.root):
+            self.status.set('Стартирането е отменено. Нищо не е променено.')
+            return
         self.closing_effects[:]=[e for e in self.closing_effects if e.thread.is_alive()]
         if self.closing_effects:
             self.status.set('Предишните native прозорци още се освобождават. Изчакайте момент и стартирайте отново.')
@@ -2035,6 +2440,9 @@ class Classroom:
         self.sound_bank.stop()
         self.detach_session_cleanup()
         self.scenario.new_session()
+        self.story=STORY_PRESETS.get(self.duration.get(),DEFAULT_STORY)
+        self.timeline=list(self.story.beats)
+        self.chapters=list(self.story.chapters)
         self.clock = 0.0
         self.event_index = 0
         self.mode = mode
@@ -2046,17 +2454,21 @@ class Classroom:
         self.pressure_handled=False
         self.pressure_samples=0
         self.limiter.reset()
-        self.rate = MASTER_DURATION/(int(self.duration.get().split()[0])*60) if mode == 'auto' else 1.0
+        self.rate = 1.0
+        self._finish_branch_gate()
+        self.close_tray_icon();self.toast_notifier.clear()
         self.last = time.monotonic()
         try:
             if sys.platform!='win32':
                 raise RuntimeError('Тази версия работи върху истински Windows 10/11.')
             self.cleanup_notice = ''
-            self.session=NativeSession(self.browser_path,self.profile.max_tabs,self.scenario.generation)
+            self.session=NativeSession(self.browser_path,self.profile.max_tabs,self.scenario.generation,
+                                       self.presentation_monitor.work_rect)
             self.last_folder=self.session.folder
             self.hide_panel()
-            LOG.info('Starting mode=%s, duration=%s, screen=%sx%s', mode, self.duration.get(),
-                     self.root.winfo_screenwidth(), self.root.winfo_screenheight())
+            LOG.info('Starting mode=%s, story=%s, display=%s, platform=%s/%s',
+                     mode,self.story.label,self.presentation_monitor.label,
+                     self.windows_profile.generation,self.windows_profile.language)
             self.resume_button.configure(text='Пауза', state='normal')
             if mode == 'auto':
                 self.advance(0)
@@ -2072,8 +2484,8 @@ class Classroom:
             self.show_panel()
             return
         if (self.paused and self.teacher_paced and self.mode=='auto' and
-                self.scenario.chapter_index+1<len(CHAPTERS) and
-                CHAPTERS[self.scenario.chapter_index+1][0]-self.clock<.01):
+                self.scenario.chapter_index+1<len(self.chapters) and
+                self.chapters[self.scenario.chapter_index+1][0]-self.clock<.01):
             self.next_chapter()
             return
         self.paused = not self.paused
@@ -2129,7 +2541,7 @@ class Classroom:
     def next_chapter(self):
         if not self.running or self.mode != 'auto':
             return
-        self.seek_chapter(min(len(CHAPTERS)-1,self.scenario.chapter_index+1))
+        self.seek_chapter(min(len(self.chapters)-1,self.scenario.chapter_index+1))
 
     def replay_chapter(self):
         if not self.running or self.mode!='auto':
@@ -2138,22 +2550,41 @@ class Classroom:
         self.seek_chapter(self.scenario.chapter_index)
 
     def seek_chapter(self,index):
-        index=max(0,min(len(CHAPTERS)-1,index))
-        target=CHAPTERS[index][0]
-        self.scenario.new_chapter(index)
+        index=max(0,min(len(self.chapters)-1,index))
+        target=self.chapters[index][0]
         self.paused=False
         self.sound_bank.stop()
+        self._finish_branch_gate()
+        self.close_tray_icon();self.toast_notifier.clear()
         self.clear_effects()
         self.close_stage()
         self.close_browser_async()
         self.native_kind=None
+        completed=[beat.scene for beat in self.timeline if beat.at<target]
+        issues=[]
+        locked_count=0
+        if self.session:
+            issues=self.session.restore_files()
+            if 'files_chapter' in completed and 'recovery' not in completed:
+                self.session.lock_files(8)
+            locked_count=sum(locked.exists() for _,locked,_ in self.session.files)
+        self.scenario.rebuild_for_story(completed,index,locked_count=locked_count)
+        if self.scenario.tray_visible:
+            self.ensure_tray_icon()
         self.clock = target
-        self.event_index = next((i for i,(t,_) in enumerate(TIMELINE) if t>=target),len(TIMELINE))
+        self.event_index = next((i for i,beat in enumerate(self.timeline) if beat.at>=target),len(self.timeline))
         try:
             self.advance(0)
         except Exception as exc:
             self.report_error('Не успях да отворя следващата глава', exc)
         self.last = time.monotonic()
+        if issues:
+            LOG.warning('Replay left changed lesson files untouched: %s',', '.join(issues))
+            self.status.set('Някои учебни файлове са променени и не бяха презаписани: '+', '.join(issues))
+            self.notify_windows(
+                self.system_text('Необходим е преглед на учебните файлове','Lesson files need review'),
+                self.system_text('Променен или конфликтен файл не беше презаписан.',
+                                 'A changed or conflicting file was not overwritten.'))
         self.hide_panel()
         self.resume_button.configure(text='Пауза',state='normal')
 
@@ -2164,10 +2595,12 @@ class Classroom:
         self.scenario.invalidate()
         self.native_kind=None
         self.sound_bank.stop()
+        self.close_tray_icon();self.toast_notifier.clear()
         self.clear_effects()
         self.close_stage()
         self.close_session()
         self.resume_button.configure(text='Продължи', state='disabled')
+        self._finish_branch_gate()
         self.status.set(self.cleanup_notice or message)
         self.show_panel()
 
@@ -2182,6 +2615,7 @@ class Classroom:
             self.job = None
         self.clear_effects()
         self.close_stage()
+        self.close_tray_icon();self.toast_notifier.clear()
         self.close_session()
         self.sound_bank.close()
         self.toast_notifier.close()
@@ -2199,14 +2633,14 @@ class Classroom:
 
     def update_status(self):
         if self.running:
-            elapsed = int(self.clock/self.rate)
-            chapter = next(name for t, name in reversed(CHAPTERS) if t <= self.clock) if self.mode == 'auto' else 'Отделна сцена'
-            total=int(MASTER_DURATION/self.rate) if self.mode=='auto' else 300
+            elapsed = int(self.clock)
+            chapter = next(name for t, name in reversed(self.chapters) if t <= self.clock) if self.mode == 'auto' else 'Отделна сцена'
+            total=self.story.duration if self.mode=='auto' else 300
             remaining=max(0,total-elapsed)
             self.status.set(f'{"ПАУЗА" if self.paused else "В ход"}  •  '
                             f'{elapsed//60:02}:{elapsed%60:02} / остава {remaining//60:02}:{remaining%60:02}  •  '
                             f'{chapter}')
-            self.chapter_status.set(f'Глава {self.scenario.chapter_index+1}/{len(CHAPTERS)}: {chapter}  •  '
+            self.chapter_status.set(f'Глава {self.scenario.chapter_index+1}/{len(self.chapters)}: {chapter}  •  '
                                     f'{"учителско темпо" if self.teacher_paced else "автоматично"}')
 
     def tick(self):
@@ -2235,6 +2669,16 @@ class Classroom:
                 elif action=='native_key':
                     {'stop':self.stop,'next':self.next_chapter,
                      'fullscreen':self.toggle_fullscreen}[payload]()
+                elif action=='tray_open':
+                    if self.running and not self.paused:
+                        self.limiter.reset('effect-launch');self.spawn('helper_status')
+                elif action=='tray_exit':
+                    self.scenario.apply_event(ScenarioEvent.HELPER_STOPPED)
+                    self.close_tray_icon()
+                    if self.running:
+                        self.record_student_choice('Block Runtime tray menu','stop')
+                elif action=='tray_error':
+                    self.status.set('Tray иконата не е достъпна; историята продължава без нея.')
                 elif action=='cleanup_done':
                     generation,notice=payload
                     if generation==self.scenario.generation and notice:
@@ -2272,8 +2716,8 @@ class Classroom:
         self.clock += min(dt,.25)*self.rate
         if self.mode == 'auto':
             previous=self.scenario.chapter_index
-            if self.teacher_paced and previous+1<len(CHAPTERS):
-                boundary=CHAPTERS[previous+1][0]
+            if self.teacher_paced and previous+1<len(self.chapters):
+                boundary=self.chapters[previous+1][0]
                 if self.clock>=boundary:
                     self.clock=boundary-.001
                     self.paused=True
@@ -2282,11 +2726,12 @@ class Classroom:
                     self.show_panel()
                     self.update_status()
                     return
-            current=retained_chapter_index(self.clock,CHAPTERS)
+            current=retained_chapter_index(self.clock,self.chapters)
             if current!=previous:
                 self.scenario.new_chapter(current)
-            while self.event_index < len(TIMELINE) and self.clock+1e-7 >= TIMELINE[self.event_index][0]:
-                _, name = TIMELINE[self.event_index]
+            while self.event_index < len(self.timeline) and self.clock+1e-7 >= self.timeline[self.event_index].at:
+                beat=self.timeline[self.event_index]
+                name=beat.scene
                 self.event_index += 1
                 if name == 'finish':
                     self.stop('Историята приключи. Обсъдете видимите признаци и правилната реакция.')
@@ -2300,6 +2745,8 @@ class Classroom:
             if effect.closed and effect.thread.is_alive() and effect not in self.closing_effects:
                 self.closing_effects.append(effect)
         self.effects[:] = [e for e in self.effects if not e.closed]
+        if self.stage is not None and self.stage.mode=='uac_dim' and not self.effects:
+            self.close_stage()
         self.advance_native()
         if self.stage is not None:
             try:
@@ -2336,7 +2783,8 @@ class Classroom:
         elif self.native_kind=='files':
             count=max(0,min(8,int((elapsed-4)/3)))
             self.session.lock_files(count)
-            self.scenario.locked_count=count
+            actual=sum(locked.exists() for _,locked,_ in self.session.files)
+            self.scenario.apply_event(ScenarioEvent.FILES_LOCKED,{'count':actual})
 
     def handle_page_action(self,index):
         scene=PAGE_ACTION_SCENES[index%len(PAGE_ACTION_SCENES)]
@@ -2363,9 +2811,10 @@ class Classroom:
             return
         LOG.info('Scene=%s, clock=%.2f', kind, self.clock)
         already_active=(kind=='reboot' and self.stage is not None and self.stage.mode=='reboot')
-        if kind in ('browser', 'tabs', 'taskmanager', 'errorwall', 'updater',
-                    'terminal_chapter', 'glitch', 'files_chapter', 'ransom',
-                    'blue', 'reboot', 'debrief'):
+        if kind in ('browser','tabs','installer','taskmanager','errorwall','updater',
+                    'protection_history','properties','network_activity','terminal_chapter',
+                    'glitch','explorer','files_chapter','ransom','recovery',
+                    'blue','reboot','debrief'):
             self.clear_effects()
             if not already_active:
                 self.close_stage()
@@ -2376,7 +2825,13 @@ class Classroom:
                 self.close_browser_async()
         getattr(self, 'scene_'+kind)()
         if self.sound.get() and not already_active:
-            self.sound_bank.play_scene(kind)
+            aliases={'uac':'SystemQuestion','notification':'SystemNotification',
+                     'warning':'SystemExclamation','firewall':'SystemExclamation',
+                     'error':'SystemHand'}
+            if kind in aliases:
+                self.sound_bank.play_system(aliases[kind])
+            else:
+                self.sound_bank.play_scene(kind)
 
     def stage_mode(self, mode):
         if self.stage is None:
@@ -2437,94 +2892,187 @@ class Classroom:
     def scene_debrief(self):
         self.stage_mode('debrief')
 
-    def scene_uac(self):
-        e=self.effect('User Account Control — Classroom Demo',650,460,
-                      bg='#e9f2f7',position='center',role='dialog',topmost=True)
+    def scene_download(self):
+        if self.scenario.download_stage=='completed':
+            return
+        self.scenario.apply_event(ScenarioEvent.DOWNLOAD_REQUESTED)
+        e=self.effect('Downloads',470,178,bg='#ffffff',position='toast',role='toast')
         if e is None:return
+        h={};state={'completed':False}
+        def cancel():
+            self.scenario.download_stage='cancelled';e.close()
+            if self.teacher_paced:self.record_student_choice('download','cancel')
+        def build(ui):
+            ui._add_label('CaveDepths_Setup.exe',22,20,340,26,11,True,'#202124','#ffffff',self.windows_profile.font)
+            h['detail']=ui._add_label('Starting download…',22,51,340,24,9,False,'#5f6368','#ffffff',self.windows_profile.font)
+            h['bar']=ui._add_progress(22,88,360,18)
+            h['percent']=ui._add_label('0%',390,84,55,25,9,False,'#5f6368','#ffffff',self.windows_profile.font)
+            h['cancel']=ui._add_button('×',414,16,34,30,self.guarded(cancel),False)
+            ui._add_label('Source: 127.0.0.1',22,127,260,22,9,False,'#6c7278','#ffffff',self.windows_profile.font)
+        e.build_async(build);e.show(activate=False)
+        def update(t):
+            if state['completed'] or self.scenario.download_stage=='cancelled':return
+            stops=((0,0,'Starting download…'),(1.5,11,'Connecting…'),(3.8,34,'1.8 MB of 5.4 MB'),
+                   (6.4,67,'3.6 MB of 5.4 MB'),(9.1,91,'Verifying download…'),(11.2,100,'Download complete'))
+            previous=stops[0]
+            for item in stops:
+                if t>=item[0]:previous=item
+            progress=previous[1]
+            upcoming=next((item for item in stops if item[0]>t),None)
+            if upcoming:
+                span=max(.1,upcoming[0]-previous[0])
+                progress=int(previous[1]+(upcoming[1]-previous[1])*(t-previous[0])/span)
+            e.set_progress(h['bar'],progress);e.set_text(h['percent'],f'{progress}%')
+            e.set_text(h['detail'],previous[2])
+            if progress>=100:
+                state['completed']=True
+                self.scenario.apply_event(ScenarioEvent.DOWNLOAD_COMPLETED)
+                e.set_enabled(h['cancel'],False)
+                if self.mode!='auto':
+                    self.limiter.reset('effect-launch');self.spawn('uac')
+        e.update_view=update
+
+    def scene_helper(self):
+        self.scenario.apply_event(ScenarioEvent.HELPER_STARTED)
+        self.ensure_tray_icon()
+        self.status.set('Block Runtime Host стартира и добави временна tray икона.')
+        self.notify_windows('Block Runtime Host','Background update service is running.')
+
+    def scene_helper_status(self):
+        e=self.effect('Block Runtime Host',620,365,bg='#f7f8fa',position='center',role='app')
+        if e is None:return
+        h={}
+        def stop_helper():
+            e.close();self.record_student_choice('Block Runtime Host','stop')
+        def open_update():
+            e.close();self.limiter.reset('effect-launch');self.spawn('updater')
+        def build(ui):
+            ui._add_label('BLOCK RUNTIME',0,0,620,58,15,True,'#ffffff','#1767a0',self.windows_profile.font)
+            ui._add_label('Runtime Host',30,82,360,34,20,True,'#253946','#f7f8fa',self.windows_profile.font)
+            h['state']=ui._add_label('Status: Running in background',30,128,510,28,10,False,'#365366','#f7f8fa',self.windows_profile.font)
+            ui._add_label('Component: ModUpdateHelper.exe\nInstalled for: CaveDepths\nUpdate channel: Automatic',
+                          30,178,540,82,10,False,'#4e5d68','#ffffff',self.windows_profile.font)
+            ui._add_button('Check for updates',30,294,145,36,self.guarded(open_update),True)
+            ui._add_button('Stop service',350,294,110,36,self.guarded(stop_helper),False)
+            ui._add_button('Close',472,294,110,36,self.guarded(e.close),False)
+        e.build_async(build);e.show()
+
+    def scene_explorer(self):
+        if not self.session:return
+        self.native_kind=None
+        self.session.reveal_files()
+        self.status.set('File Explorer показва само осемте временни учебни файла.')
+
+    def scene_uac(self):
+        self.stage_mode('uac_dim')
+        title=self.system_text('Управление на потребителските акаунти','User Account Control')
+        e=self.effect(title,650,460,
+                      bg='#e9f2f7',position='center',role='dialog',topmost=True)
+        if e is None:self.close_stage();return
         h={};state={'details':False}
-        def allow_demo():
-            e.close()
-            # This replaces the consent window one-for-one, so the ordinary
-            # launch limiter can be reset without increasing the live budget.
-            self.limiter.reset('effect-launch')
-            self.spawn('installer')
+        def decide(choice):
+            e.close();self.close_stage()
+            event=ScenarioEvent.UAC_APPROVED if choice=='yes' else ScenarioEvent.UAC_DECLINED
+            self.scenario.apply_event(event,{'idempotency_key':f'{event.value}:{self.scenario.chapter_generation}'})
+            self.record_student_choice(title,choice,'installer')
         def toggle_details():
             state['details']=not state['details']
             e.set_visible(h['details'],state['details'])
-            e.set_text(h['toggle'],'Hide details' if state['details'] else 'Show details')
+            e.set_text(h['toggle'],self.system_text(
+                'Скрий подробностите' if state['details'] else 'Покажи подробности',
+                'Hide details' if state['details'] else 'Show details'))
         def build(ui):
             ui._set_icon(32515)
             ui._add_label('◆',27,31,72,74,43,True,'#2f78a6','#e9f2f7','Segoe UI')
-            ui._add_label('User Account Control',116,28,490,32,17,True,'#17384c','#e9f2f7','Segoe UI')
-            ui._add_label('Do you want to allow this app to make changes to your device?',
+            ui._add_label(title,116,28,490,32,17,True,'#17384c','#e9f2f7',self.windows_profile.font)
+            ui._add_label(self.system_text('Искате ли да разрешите на това приложение да прави промени по устройството?',
+                                           'Do you want to allow this app to make changes to your device?'),
                           116,68,495,62,13,False,'#1e3645','#e9f2f7','Segoe UI')
             ui._add_label('CaveDepths Mod Setup',116,148,470,30,14,True,'#1d3341','#e9f2f7','Segoe UI')
-            ui._add_label('Verified publisher:  Unknown\nFile origin:  Hard drive on this computer',
+            ui._add_label(self.system_text('Проверен издател:  Неизвестен\nПроизход:  Твърд диск на този компютър',
+                                           'Verified publisher:  Unknown\nFile origin:  Hard drive on this computer'),
                           116,187,480,55,10,False,'#425967','#e9f2f7','Segoe UI')
-            h['details']=ui._add_label('Program location:\nC:\\Users\\Student\\Downloads\\CaveDepths_Setup.exe\n\nNo elevation token or process is created.',
-                                       116,248,480,92,9,False,'#425967','#dce8ee','Consolas')
-            h['toggle']=ui._add_button('Show details',26,363,112,34,self.guarded(toggle_details),False)
-            ui._add_button('No',411,363,92,34,self.guarded(e.close),False)
-            ui._add_button('Yes (demo)',512,363,104,34,self.guarded(allow_demo),True)
-            ui._add_label('CLASSROOM DEMO • ordinary window • no administrator request',
-                          26,418,590,22,9,True,'#7b4f16','#e9f2f7','Segoe UI')
+            h['details']=ui._add_label(self.system_text(
+                                        'Местоположение на програмата:\nC:\\Users\\Student\\Downloads\\CaveDepths_Setup.exe\n\nСъстояние на сертификата: Няма данни',
+                                        'Program location:\nC:\\Users\\Student\\Downloads\\CaveDepths_Setup.exe\n\nCertificate status: Not available'),
+                                        116,248,480,92,9,False,'#425967','#dce8ee','Consolas')
+            h['toggle']=ui._add_button(self.system_text('Покажи подробности','Show details'),26,363,145,34,self.guarded(toggle_details),False)
+            ui._add_button(self.system_text('Не','No'),411,363,92,34,self.guarded(lambda:decide('no')),False)
+            ui._add_button(self.system_text('Да','Yes'),512,363,104,34,self.guarded(lambda:decide('yes')),True)
         e.build_async(build,lambda:e.set_visible(h['details'],False));e.limit=11;e.show()
 
     def scene_firewall(self):
-        e=self.effect('Windows Security Alert — Classroom Demo',650,485,
+        title=self.system_text('Предупреждение от Защитна стена на Windows','Windows Security Alert')
+        e=self.effect(title,650,485,
                       bg='#f4f4f4',position='center',role='dialog')
         if e is None:return
         h={};state={'decided':False}
-        def decide(caption):
+        def decide(choice,caption):
             if state['decided']:return
             state['decided']=True
-            e.set_text(h['status'],caption+' — no firewall rule was created.')
+            event=ScenarioEvent.FIREWALL_ALLOWED if choice=='allow' else ScenarioEvent.FIREWALL_BLOCKED
+            self.scenario.apply_event(event,{'idempotency_key':f'firewall:{self.scenario.chapter_generation}'})
+            e.set_text(h['status'],caption)
             e.set_enabled(h['allow'],False);e.set_enabled(h['cancel'],False)
+            self.record_student_choice(title,choice)
         def build(ui):
             ui._set_icon(32515)
             ui._add_label('▣',24,27,70,72,39,True,'#2d6f9f','#f4f4f4','Segoe UI')
-            ui._add_label('Windows Defender Firewall has blocked some features of this app',
+            ui._add_label(self.system_text(
+                              'Защитна стена на Windows Defender блокира някои функции на това приложение',
+                              'Windows Defender Firewall has blocked some features of this app'),
                           108,25,510,58,15,True,'#243746','#f4f4f4','Segoe UI')
-            ui._add_label('The fictional helper requested network access after the mod setup.',
+            ui._add_label(self.system_text(
+                              'Block Runtime Host поиска достъп до мрежата след инсталирането на мода.',
+                              'Block Runtime Host requested network access after the mod setup.'),
                           108,88,505,42,10,False,'#4b5964','#f4f4f4','Segoe UI')
-            ui._add_label('Name:  mod_update_helper.exe\nPublisher:  Unknown\nPath:  C:\\Users\\Student\\Downloads\\CaveDepths',
+            ui._add_label(self.system_text(
+                              'Име:  ModUpdateHelper.exe\nИздател:  Неизвестен\nПът:  C:\\Users\\Student\\AppData\\Local\\BlockRuntime',
+                              'Name:  ModUpdateHelper.exe\nPublisher:  Unknown\nPath:  C:\\Users\\Student\\AppData\\Local\\BlockRuntime'),
                           108,145,505,75,10,False,'#273943','#ffffff','Segoe UI')
-            ui._add_label('☑  Private networks, such as home or school\n☐  Public networks, such as airports and cafés',
+            ui._add_label(self.system_text(
+                              '☑  Частни мрежи, например у дома или в училище\n☐  Публични мрежи, например на летища и в кафенета',
+                              '☑  Private networks, such as home or school\n☐  Public networks, such as airports and cafés'),
                           108,241,505,66,10,False,'#364955','#f4f4f4','Segoe UI')
-            h['status']=ui._add_label('Choose an action for this classroom reconstruction.',
-                                      108,319,505,35,10,False,'#7a4d16','#f4f4f4','Segoe UI')
-            h['allow']=ui._add_button('Allow demo access',358,381,132,36,
-                                      self.guarded(lambda:decide('Allowed in demo')),True)
-            h['cancel']=ui._add_button('Cancel',500,381,112,36,
-                                       self.guarded(lambda:decide('Cancelled')),False)
-            ui._add_label('No port, firewall setting or network permission is changed.',
-                          25,445,585,22,9,True,'#6c7880','#f4f4f4','Segoe UI')
+            h['status']=ui._add_label(self.system_text(
+                                          'Изберете дали приложението може да комуникира в тези мрежи.',
+                                          'Choose whether this app can communicate on these networks.'),
+                                        108,319,505,35,10,False,'#7a4d16','#f4f4f4','Segoe UI')
+            h['allow']=ui._add_button(self.system_text('Разреши достъп','Allow access'),340,381,150,36,
+                                      self.guarded(lambda:decide('allow',self.system_text('Достъпът е разрешен','Access allowed'))),True)
+            h['cancel']=ui._add_button(self.system_text('Отказ','Cancel'),500,381,112,36,
+                                       self.guarded(lambda:decide('block',self.system_text('Заявката е отменена','Request cancelled'))),False)
         e.build_async(build);e.limit=24;e.show()
 
     def scene_taskmanager(self):
-        e=self.effect('Task Manager — Classroom Data',830,570,bg='#f6f6f6',
+        title=self.system_text('Диспечер на задачите','Task Manager')
+        e=self.effect(title,830,570,bg='#f6f6f6',
                       position='center',role='app',resizable=True)
         if e is None:return
         h={};state={'stopped':False,'last':-1}
         def end_demo_task():
             state['stopped']=True
-            e.set_text(h['status'],'Demo task ended • no Windows process was touched')
+            self.scenario.apply_event(ScenarioEvent.HELPER_STOPPED)
+            self.close_tray_icon()
+            e.set_text(h['status'],self.system_text('ModUpdateHelper.exe беше спрян','ModUpdateHelper.exe was stopped'))
             e.set_enabled(h['end'],False)
+            self.record_student_choice(title,'stop')
         def build(ui):
-            ui._add_label('Processes   Performance   App history   Startup apps   Users   Details   Services',
+            ui._add_label(self.system_text(
+                              'Процеси   Производителност   Хронология   Стартиране   Потребители   Подробности   Услуги',
+                              'Processes   Performance   App history   Startup apps   Users   Details   Services'),
                           18,15,790,32,10,False,'#26343e','#f6f6f6','Segoe UI')
-            h['status']=ui._add_label('Synthetic process activity • not read from this computer',
+            h['status']=ui._add_label(self.system_text('Процеси','Processes'),
                                       18,54,790,28,10,True,'#1f6d55','#f6f6f6','Segoe UI')
             h['rows']=ui._add_edit('',18,91,790,270,10,'#27323a','#ffffff')
             ui._add_label('CPU',18,384,55,24,10,True,'#334752','#f6f6f6','Segoe UI')
             h['cpu']=ui._add_progress(75,385,280,20)
             h['cpu_text']=ui._add_label('0%',365,382,72,25,10,True,'#a12d39','#f6f6f6','Segoe UI')
-            ui._add_label('Disk',18,420,55,24,10,True,'#334752','#f6f6f6','Segoe UI')
+            ui._add_label(self.system_text('Диск','Disk'),18,420,55,24,10,True,'#334752','#f6f6f6','Segoe UI')
             h['disk']=ui._add_progress(75,421,280,20)
             h['disk_text']=ui._add_label('0%',365,418,72,25,10,True,'#9b6a1b','#f6f6f6','Segoe UI')
-            h['network']=ui._add_label('Network  0 Mbps',465,385,310,55,11,True,'#334752','#f6f6f6','Segoe UI')
-            ui._add_label('Values are prerecorded classroom fixtures.',18,493,430,25,9,False,'#697781','#f6f6f6','Segoe UI')
-            h['end']=ui._add_button('End demo task',656,486,145,36,self.guarded(end_demo_task),True)
+            h['network']=ui._add_label(self.system_text('Мрежа  0 Mbps','Network  0 Mbps'),465,385,310,55,11,True,'#334752','#f6f6f6','Segoe UI')
+            h['end']=ui._add_button(self.system_text('Край на задачата','End task'),636,486,165,36,self.guarded(end_demo_task),True)
         e.build_async(build)
         def update(t):
             slot=int(t*2)
@@ -2538,28 +3086,31 @@ class Classroom:
                 network=max(0.1,3.8+3.3*math.sin(t*.52))
             rows=(
                 'Name                              Status          CPU      Memory\r\n'
-                'mod_update_helper.exe             Suspicious      '
+                'ModUpdateHelper.exe               Running         '
                 f'{cpu:>2}%      184.6 MB\r\n'
-                'CaveDepths_Setup.exe              Running          8%       72.1 MB\r\n'
-                'Browser (classroom profile)       6 tabs          12%      418.3 MB\r\n'
-                'PC Defender (fictional)           Scanning         5%       63.8 MB\r\n'
-                'Windows Explorer                  Running          1%       96.4 MB\r\n\r\n'
-                'The rows above are synthetic and do not enumerate real processes.')
+                'BlockRuntimeHost.exe              Running          8%       72.1 MB\r\n'
+                'CaveDepths Setup                  Suspended         0%       18.4 MB\r\n'
+                'Browser                           4 processes      12%      318.3 MB\r\n'
+                'PC Defender                       Running           5%       63.8 MB\r\n'
+                'Windows Explorer                  Running           1%       96.4 MB')
             e.set_text(h['rows'],rows);e.set_progress(h['cpu'],cpu);e.set_progress(h['disk'],disk)
             e.set_text(h['cpu_text'],f'{cpu}%');e.set_text(h['disk_text'],f'{disk}%')
-            e.set_text(h['network'],f'Network  {network:.1f} Mbps\nGPU  {max(2,cpu//5)}%')
+            e.set_text(h['network'],self.system_text(
+                f'Мрежа  {network:.1f} Mbps\nGPU  {max(2,cpu//5)}%',
+                f'Network  {network:.1f} Mbps\nGPU  {max(2,cpu//5)}%'))
         e.update_view=update;e.show()
 
     def scene_updater(self):
-        e=self.effect('Block Runtime Update — Classroom Demo',650,430,
+        e=self.effect('Block Runtime Update',650,430,
                       bg='#f7f7f7',position='center',role='app')
         if e is None:return
         h={};state={'cancelled':False,'last':-1}
         def cancel_update():
             state['cancelled']=True
             e.set_text(h['headline'],'Update cancelled')
-            e.set_text(h['detail'],'No component, service or registry setting was changed.')
+            e.set_text(h['detail'],'The requested component was not installed.')
             e.set_enabled(h['cancel'],False)
+            self.record_student_choice('Block Runtime Update','cancel')
         def build(ui):
             ui._add_label('BLOCK RUNTIME',0,0,650,58,16,True,'#ffffff','#1767a0','Segoe UI')
             h['headline']=ui._add_label('Installing required game component',35,88,580,38,20,True,'#253946','#f7f7f7','Segoe UI')
@@ -2567,12 +3118,11 @@ class Classroom:
                           35,140,580,55,10,False,'#52616b','#f7f7f7','Segoe UI')
             h['bar']=ui._add_progress(35,225,580,24)
             h['percent']=ui._add_label('0%',555,259,60,25,10,True,'#334854','#f7f7f7','Segoe UI')
-            h['detail']=ui._add_label('Preparing local classroom package…',35,260,500,50,10,False,'#52616b','#f7f7f7','Segoe UI')
+            h['detail']=ui._add_label('Preparing package…',35,260,500,50,10,False,'#52616b','#f7f7f7','Segoe UI')
             h['cancel']=ui._add_button('Cancel',505,337,110,36,self.guarded(cancel_update),False)
-            ui._add_label('DEMO ONLY • no runtime is installed',35,389,420,22,9,True,'#8a5b18','#f7f7f7','Segoe UI')
         e.build_async(build)
-        steps=('Preparing local classroom package…','Checking fictional signature…',
-               'Copying demonstration components…','Registering demo state…','Finishing…')
+        steps=('Preparing package…','Checking package signature…',
+               'Copying runtime components…','Registering update state…','Finishing…')
         def update(t):
             if state['cancelled']:return
             progress=min(100,int(t/24*100));slot=min(len(steps)-1,progress//21)
@@ -2580,28 +3130,35 @@ class Classroom:
             state['last']=progress;e.set_progress(h['bar'],progress)
             e.set_text(h['percent'],f'{progress}%');e.set_text(h['detail'],steps[slot])
             if progress>=100:
-                e.set_text(h['headline'],'Block Runtime is ready (demo)')
-                e.set_text(h['detail'],'Visual sequence completed; Windows was not modified.')
+                e.set_text(h['headline'],'Block Runtime is up to date')
+                e.set_text(h['detail'],'Version 4.8.12 is ready.')
                 e.set_enabled(h['cancel'],False)
                 self.notify_windows('Block Runtime update',
-                                    'Учебната update последователност приключи. Не е инсталиран компонент.')
+                                    'Block Runtime 4.8.12 is ready.')
         e.update_view=update;e.show()
 
     def scene_installer(self):
-        e=self.effect('CaveDepths Mod Setup — Classroom Demo',600,440,position='center',role='app')
+        if self.scenario.phase in ('discovery','delivery','decision'):
+            self.scenario.apply_event(
+                ScenarioEvent.UAC_APPROVED,
+                {'idempotency_key':f'auto-uac:{self.scenario.chapter_generation}'})
+        e=self.effect('CaveDepths Mod Setup',600,440,position='center',role='app')
         if e is None:return
         state={'stage':'welcome','opened':self.clock,'started':0.0,'progress':-1}
         h={}
         def cancel():
-            self.scenario.installer_stage='cancelled'; e.close()
+            self.scenario.apply_event(
+                ScenarioEvent.INSTALL_CANCELLED,
+                {'idempotency_key':f'install-cancel:{self.scenario.chapter_generation}'})
+            e.close();self.record_student_choice('CaveDepths Setup','cancel','helper')
         def render_stage():
             stage=state['stage']; self.scenario.installer_stage=stage
             titles={'welcome':'Welcome to CaveDepths Mod Setup','options':'Choose setup options',
                     'installing':'Installing CaveDepths','completed':'Setup completed'}
-            bodies={'welcome':'This wizard demonstrates how a suspicious installer may look.\nNo software will be installed.',
-                    'options':'Installation type: Typical\nDestination: classroom temporary area\n\nThese choices are fictional and do not change Windows.',
-                    'installing':'Please wait while the fictional components are prepared.',
-                    'completed':'CaveDepths was “installed” only inside this visual demonstration.\nNo executable or setting was created.'}
+            bodies={'welcome':'Setup will install CaveDepths and the required Block Runtime components.\nClose Minecraft before continuing.',
+                    'options':'Installation type: Typical\nDestination: C:\\Users\\Student\\AppData\\Local\\CaveDepths\n\nAdditional component: Block Runtime Host',
+                    'installing':'Please wait while Setup installs the selected components.',
+                    'completed':'CaveDepths has been installed.\nClick Finish to close Setup.'}
             e.set_text(h['title'],titles[stage]); e.set_text(h['body'],bodies[stage])
             e.set_visible(h['bar'],stage=='installing'); e.set_visible(h['detail'],stage=='installing')
             e.set_visible(h['percent'],stage=='installing'); e.set_enabled(h['back'],stage=='options')
@@ -2611,6 +3168,9 @@ class Classroom:
             if state['stage']=='welcome':state['stage']='options'
             elif state['stage']=='options':
                 state['stage']='installing'; state['started']=self.clock
+                self.scenario.apply_event(
+                    ScenarioEvent.INSTALL_STARTED,
+                    {'idempotency_key':f'install-start:{self.scenario.chapter_generation}'})
             render_stage()
         def back():
             if state['stage']=='options':state['stage']='welcome'; render_stage()
@@ -2628,20 +3188,24 @@ class Classroom:
             h['finish']=ui._add_button('Finish',382,370,85,34,self.guarded(e.close),True)
             h['cancel']=ui._add_button('Cancel',482,370,85,34,self.guarded(cancel),False)
         e.build_async(build,render_stage);e.show()
-        phases=[(0,0,'Preparing package…'),(1.4,9,'Checking compatibility…'),
-                (3.7,31,'Copying fictional components…'),(7.2,66,'Registering demo entries…'),
-                (10.8,89,'Creating classroom shortcuts…'),(13.0,100,'Finishing…')]
+        phases=[(0,0,'Preparing package…'),(2.1,8,'Checking compatibility…'),
+                (5.2,29,'Copying Block Runtime files…'),(10.4,64,'Registering components…'),
+                (15.1,88,'Creating shortcuts…'),(18.0,100,'Finishing…')]
         def update(_):
             age=max(0,self.clock-state['opened'])
-            if self.mode=='auto' and state['stage']=='welcome' and age>=3:
+            if self.mode=='auto' and state['stage']=='welcome' and age>=6:
                 state['stage']='options';render_stage()
-            elif self.mode=='auto' and state['stage']=='options' and age>=7:
-                state['stage']='installing';state['started']=self.clock;render_stage()
+            elif self.mode=='auto' and state['stage']=='options' and age>=12:
+                state['stage']='installing';state['started']=self.clock
+                self.scenario.apply_event(
+                    ScenarioEvent.INSTALL_STARTED,
+                    {'idempotency_key':f'auto-install:{self.scenario.chapter_generation}'})
+                render_stage()
             if state['stage']!='installing':return
             elapsed=max(0,self.clock-state['started']); progress=0; detail=phases[0][2]
             for start,value,text in phases:
                 if elapsed>=start:progress=value;detail=text
-            if elapsed<13:
+            if elapsed<18:
                 upcoming=next((p for p in phases if p[0]>elapsed),phases[-1])
                 previous=max((p for p in phases if p[0]<=elapsed),key=lambda p:p[0])
                 span=max(.1,upcoming[0]-previous[0])
@@ -2650,50 +3214,69 @@ class Classroom:
                 state['progress']=progress;e.set_progress(h['bar'],progress)
                 e.set_text(h['percent'],f'{progress}%');e.set_text(h['detail'],detail)
             if progress>=100:
-                state['stage']='completed';render_stage()
+                state['stage']='completed'
+                self.scenario.apply_event(
+                    ScenarioEvent.INSTALL_COMPLETED,
+                    {'idempotency_key':f'install-complete:{self.scenario.chapter_generation}'})
+                render_stage()
         e.update_view=update
 
     def scene_notification(self):
-        e=self.effect('Classroom notification',410,190,bg='#242424',position='toast',role='toast')
+        e=self.effect('PC Defender',410,190,bg='#242424',position='toast',role='toast')
         if e is None:return
         def details():e.close();self.spawn('warning')
         def build(ui):
             ui._add_label('■',18,19,30,32,17,True,'#67b49f','#242424','Segoe UI')
-            ui._add_label('Защита на устройството',57,17,285,28,12,True,'#ffffff','#242424','Segoe UI')
+            ui._add_label(self.system_text('Защита от вируси и заплахи','Virus & threat protection'),57,17,285,28,12,True,'#ffffff','#242424','Segoe UI')
             ui._add_label(time.strftime('%H:%M'),344,18,48,24,9,False,'#b9b9b9','#242424','Segoe UI')
-            ui._add_label('Подозрителна активност от mod_update_helper.exe\nИзберете Details за учебното обяснение.',18,57,372,55,10,False,'#e2e2e2','#242424','Segoe UI')
-            ui._add_button('Details',272,132,82,30,self.guarded(details),False)
+            ui._add_label(self.system_text(
+                              'Подозрителна активност от ModUpdateHelper.exe\nПрегледайте откритото поведение.',
+                              'Suspicious activity from ModUpdateHelper.exe\nReview the detected behavior.'),
+                          18,57,372,55,10,False,'#e2e2e2','#242424','Segoe UI')
+            ui._add_button(self.system_text('Подробности','Details'),250,132,104,30,self.guarded(details),False)
             ui._add_button('×',360,132,32,30,self.guarded(e.close),False)
         e.build_async(build);e.limit=18;e.show(activate=False)
-        self.notify_windows('Защита на устройството',
-                            'Подозрителна активност от mod_update_helper.exe. Това е учебна симулация.')
+        self.notify_windows('PC Defender',self.system_text(
+            'Подозрителна активност от ModUpdateHelper.exe.',
+            'Suspicious activity from ModUpdateHelper.exe.'))
 
     def scene_warning(self):
-        e=self.effect('Security Center — Action required',570,390,position='center',role='dialog')
+        self.scenario.apply_event(
+            ScenarioEvent.ALERT_RAISED,
+            {'idempotency_key':f'alert:{self.scenario.chapter_generation}'})
+        e=self.effect(self.system_text('PC Defender — Необходимо е действие','PC Defender — Action required'),
+                      570,390,position='center',role='dialog')
         if e is None:return
         h={};state={'expanded':False}
         def scan():e.close();self.spawn('scanner')
         def toggle_details():
             state['expanded']=not state['expanded'];e.set_visible(h['details'],state['expanded'])
-            e.set_text(h['toggle'],'Hide details' if state['expanded'] else 'Show details')
+            e.set_text(h['toggle'],self.system_text(
+                'Скрий подробностите' if state['expanded'] else 'Покажи подробности',
+                'Hide details' if state['expanded'] else 'Show details'))
             e.resize(570,475 if state['expanded'] else 390)
         def build(ui):
             ui._set_icon(32515)
             ui._add_label('!',24,28,55,58,37,True,'#a86b17','#f3f3f3','Segoe UI')
-            ui._add_label('Potentially unwanted software',94,28,440,30,16,True,'#263747','#f3f3f3','Segoe UI')
-            ui._add_label('A fictional helper requested an unexpected action.\nDo not use this dialog as proof of a real infection.',94,67,440,54,10,False,'#43515f','#f3f3f3','Segoe UI')
-            ui._add_label('Process',25,147,90,24,10,True,'#59636c','#f3f3f3','Segoe UI')
-            ui._add_label('mod_update_helper.exe',122,147,260,24,10,False,'#222222','#f3f3f3','Segoe UI')
-            ui._add_label('Severity',25,179,90,24,10,True,'#59636c','#f3f3f3','Segoe UI')
-            ui._add_label('High (fabricated)',122,179,260,24,10,False,'#a32b37','#f3f3f3','Segoe UI')
-            h['details']=ui._add_label('Technical details\nSource: local classroom fixture\nEvent: DEMO-SEC-204\nNo file or registry key was inspected.',25,230,510,92,9,False,'#485866','#e7ebef','Consolas')
-            h['toggle']=ui._add_button('Show details',25,326,110,32,self.guarded(toggle_details),False)
-            ui._add_button('Run demo scan',303,326,125,32,self.guarded(scan),True)
-            ui._add_button('Dismiss',438,326,97,32,self.guarded(e.close),False)
+            ui._add_label(self.system_text('Потенциално нежелан софтуер','Potentially unwanted software'),94,28,440,30,16,True,'#263747','#f3f3f3','Segoe UI')
+            ui._add_label(self.system_text(
+                              'Неизвестен помощен процес поиска неочаквано действие.\nПрегледайте подробностите, преди да му разрешите да продължи.',
+                              'An unknown helper requested an unexpected action.\nReview the details before allowing it to continue.'),
+                          94,67,440,54,10,False,'#43515f','#f3f3f3','Segoe UI')
+            ui._add_label(self.system_text('Процес','Process'),25,147,90,24,10,True,'#59636c','#f3f3f3','Segoe UI')
+            ui._add_label('ModUpdateHelper.exe',122,147,260,24,10,False,'#222222','#f3f3f3','Segoe UI')
+            ui._add_label(self.system_text('Ниво','Severity'),25,179,90,24,10,True,'#59636c','#f3f3f3','Segoe UI')
+            ui._add_label(self.system_text('Високо','High'),122,179,260,24,10,False,'#a32b37','#f3f3f3','Segoe UI')
+            h['details']=ui._add_label(self.system_text(
+                'Технически подробности\nИД на поведение: BRH-204\nПроизход: CaveDepths_Setup.exe\nЗасегнат компонент: BlockRuntimeHost.exe',
+                'Technical details\nBehavior ID: BRH-204\nOrigin: CaveDepths_Setup.exe\nAffected component: BlockRuntimeHost.exe'),25,230,510,92,9,False,'#485866','#e7ebef','Consolas')
+            h['toggle']=ui._add_button(self.system_text('Покажи подробности','Show details'),25,326,145,32,self.guarded(toggle_details),False)
+            ui._add_button(self.system_text('Сканирай сега','Scan now'),303,326,125,32,self.guarded(scan),True)
+            ui._add_button(self.system_text('Отхвърли','Dismiss'),438,326,97,32,self.guarded(e.close),False)
         e.build_async(build,lambda:e.set_visible(h['details'],False));e.show()
 
     def scene_advert(self):
-        e = self.effect('Special offer — Classroom Demo', 520, 390, bg='#ffffff',role='app')
+        e = self.effect('Lucky Chest Rewards', 520, 390, bg='#ffffff',role='app')
         if e is None:return
         title, subtitle = self.rng.choice([
             ('ПОЗДРАВЛЕНИЯ!', 'Избрани сте за специална награда!'),
@@ -2701,7 +3284,7 @@ class Classroom:
             ('БЕЗПЛАТНИ БОНУСИ!', 'Офертата изтича след броени минути.')])
         h={}
         def build(ui):
-            ui._add_label('  localhost / local classroom offer',0,0,520,42,10,False,'#555555','#ededed','Segoe UI')
+            ui._add_label('  LUCKY CHEST REWARDS  •  MEMBER OFFER',0,0,520,42,10,True,'#555555','#ededed','Segoe UI')
             ui._add_label(title,28,74,464,48,25,True,'#8523ac','#ffffff','Segoe UI')
             ui._add_label(subtitle,28,137,464,52,12,False,'#202020','#ffffff','Segoe UI')
             h['countdown']=ui._add_label('Оставащо време: 01:59',28,210,464,38,18,True,'#c02e42','#ffffff','Segoe UI')
@@ -2715,11 +3298,11 @@ class Classroom:
         e.show()
 
     def scene_terminal(self):
-        e=self.effect('Classroom Terminal — prerecorded output',830,520,bg='#0c0c0c',role='app',resizable=True)
+        e=self.effect('Incident Response Console',830,520,bg='#0c0c0c',role='app',resizable=True)
         if e is None:return
         h={}
         def build(ui):
-            h['state']=ui._add_label('CONNECTED • LOCAL FIXTURE',12,10,795,25,9,True,'#79c99e','#0c0c0c','Consolas')
+            h['state']=ui._add_label('OFFLINE TRACE • CASE BR-204',12,10,795,25,9,True,'#79c99e','#0c0c0c','Consolas')
             h['text']=ui._add_edit('',10,42,810,430,11,'#c6c6c6','#0c0c0c')
         e.build_async(build)
         state = {'count': -1}
@@ -2738,59 +3321,236 @@ class Classroom:
         e.show()
 
     def scene_scanner(self):
-        e=self.effect('PC Defender — Fictional Scanner',660,470,role='app')
+        e=self.effect('PC Defender',660,470,role='app')
         if e is None:return
         h={};state={'started':self.clock,'pause_at':0.0,'paused_total':0.0,'paused':False,'stopped':False,'details':False}
         def pause_scan():
             if state['stopped'] or self.scenario.scanner_stage=='completed':return
-            state['paused']=not state['paused'];self.scenario.scanner_paused=state['paused']
+            state['paused']=not state['paused']
+            self.scenario.apply_event(ScenarioEvent.SCAN_PAUSED,{'paused':state['paused']})
             if state['paused']:state['pause_at']=self.clock
             else:state['paused_total']+=self.clock-state['pause_at']
-            e.set_text(h['pause'],'Resume' if state['paused'] else 'Pause')
-            e.set_text(h['status'],'Paused by instructor' if state['paused'] else 'Scanning synthetic fixture…')
+            e.set_text(h['pause'],self.system_text(
+                'Продължи' if state['paused'] else 'Пауза',
+                'Resume' if state['paused'] else 'Pause'))
+            e.set_text(h['status'],self.system_text(
+                'Сканирането е на пауза' if state['paused'] else 'Сканиране…',
+                'Scan paused' if state['paused'] else 'Scanning…'))
         def stop_scan():
-            state['stopped']=True;self.scenario.scanner_stage='cancelled'
-            e.set_text(h['status'],'Scan cancelled — no computer data was inspected.')
+            state['stopped']=True;self.scenario.apply_event(ScenarioEvent.SCAN_CANCELLED)
+            e.set_text(h['status'],self.system_text('Сканирането е отменено','Scan cancelled'))
             e.set_enabled(h['pause'],False);e.set_enabled(h['stop'],False)
         def details():
             state['details']=not state['details']
-            text='\r\n'.join(self.scenario.scanner_results) if state['details'] else 'Select Details to view the synthetic fixture.'
-            e.append_edit(h['results'],text);e.set_text(h['details'],'Summary' if state['details'] else 'Details')
+            text=('\r\n'.join(self.scenario.scanner_results) if state['details'] else
+                  self.system_text('Изберете „Подробности“, за да видите откритите елементи.',
+                                   'Select Details to view detected items.'))
+            e.append_edit(h['results'],text);e.set_text(h['details'],self.system_text(
+                'Обобщение' if state['details'] else 'Подробности',
+                'Summary' if state['details'] else 'Details'))
         def build(ui):
             ui._add_label('PC DEFENDER',0,0,155,470,16,True,'#eaf2f8','#294867','Segoe UI')
-            ui._add_label('Overview\n\nSystem Scan\n\nHistory\n\nSettings',20,72,115,220,10,False,'#bdd0df','#294867','Segoe UI')
-            ui._add_label('System Scan',182,24,430,38,22,True,'#294867','#f3f3f3','Segoe UI')
-            h['status']=ui._add_label('Scanning synthetic fixture…',182,70,430,28,10,False,'#526273','#f3f3f3','Segoe UI')
-            h['stat']=ui._add_label('Items checked: 0  •  0%',182,112,430,28,11,True,'#253a4c','#f3f3f3','Segoe UI')
+            ui._add_label(self.system_text('Общ преглед\n\nСистемно сканиране\n\nХронология\n\nНастройки','Overview\n\nSystem Scan\n\nHistory\n\nSettings'),20,72,115,220,10,False,'#bdd0df','#294867','Segoe UI')
+            ui._add_label(self.system_text('Системно сканиране','System Scan'),182,24,430,38,22,True,'#294867','#f3f3f3','Segoe UI')
+            h['status']=ui._add_label(self.system_text('Сканиране…','Scanning…'),182,70,430,28,10,False,'#526273','#f3f3f3','Segoe UI')
+            h['stat']=ui._add_label(self.system_text('Проверени елементи: 0  •  0%','Items checked: 0  •  0%'),182,112,430,28,11,True,'#253a4c','#f3f3f3','Segoe UI')
             h['bar']=ui._add_progress(182,149,440,22)
-            h['found']=ui._add_label('Findings: 0',182,190,430,32,16,True,'#a82d3e','#f3f3f3','Segoe UI')
-            h['current']=ui._add_label('Current item: fixture://startup/demo-000',182,228,440,25,9,False,'#66737d','#f3f3f3','Consolas')
-            h['results']=ui._add_edit('Select Details to view the synthetic fixture.',182,270,440,92,9,'#394957','#ffffff')
-            h['pause']=ui._add_button('Pause',182,391,85,34,self.guarded(pause_scan),False)
-            h['stop']=ui._add_button('Stop',276,391,85,34,self.guarded(stop_scan),False)
-            h['details']=ui._add_button('Details',370,391,85,34,self.guarded(details),False)
-            ui._add_button('Close',527,391,95,34,self.guarded(e.close),False)
-        e.build_async(build);self.scenario.scanner_stage='scanning'
+            h['found']=ui._add_label(self.system_text('Открити: 0','Findings: 0'),182,190,430,32,16,True,'#a82d3e','#f3f3f3','Segoe UI')
+            h['current']=ui._add_label(self.system_text('Текущ елемент: ','Current item: ')+'C:\\Users\\Student\\AppData\\Local\\BlockRuntime',182,228,440,25,9,False,'#66737d','#f3f3f3','Consolas')
+            h['results']=ui._add_edit(self.system_text('Изберете „Подробности“, за да видите откритите елементи.','Select Details to view detected items.'),182,270,440,92,9,'#394957','#ffffff')
+            h['pause']=ui._add_button(self.system_text('Пауза','Pause'),182,391,85,34,self.guarded(pause_scan),False)
+            h['stop']=ui._add_button(self.system_text('Спри','Stop'),276,391,85,34,self.guarded(stop_scan),False)
+            h['details']=ui._add_button(self.system_text('Подробности','Details'),370,391,105,34,self.guarded(details),False)
+            ui._add_button(self.system_text('Затвори','Close'),527,391,95,34,self.guarded(e.close),False)
+        e.build_async(build);self.scenario.apply_event(ScenarioEvent.SCAN_STARTED)
         def update(t):
             if state['stopped'] or state['paused']:return
             elapsed=max(0,self.clock-state['started']-state['paused_total']);p=min(1,elapsed/22)
             checked=int(p*2400);found=min(len(self.scenario.scanner_results),int(p*4))
-            e.set_progress(h['bar'],p*100);e.set_text(h['stat'],f'Items checked: {checked:,}  •  {int(p*100)}%')
-            e.set_text(h['found'],f'Findings: {found}');e.set_text(h['current'],f'Current item: fixture://documents/demo-{checked%97:03}')
+            e.set_progress(h['bar'],p*100);e.set_text(h['stat'],self.system_text(
+                f'Проверени елементи: {checked:,}  •  {int(p*100)}%',
+                f'Items checked: {checked:,}  •  {int(p*100)}%'))
+            e.set_text(h['found'],self.system_text(f'Открити: {found}',f'Findings: {found}'))
+            e.set_text(h['current'],self.system_text('Текущ елемент: ','Current item: ')+f'C:\\Users\\Student\\AppData\\Local\\BlockRuntime\\cache-{checked%97:03}.dat')
             if p>=1 and self.scenario.scanner_stage!='completed':
-                self.scenario.scanner_stage='completed';e.set_text(h['status'],'Completed — synthetic fixture only.')
+                self.scenario.apply_event(ScenarioEvent.SCAN_COMPLETED)
+                e.set_text(h['status'],self.system_text('Сканирането завърши','Scan complete'))
                 e.set_enabled(h['pause'],False);e.set_enabled(h['stop'],False)
-                self.notify_windows('Сканирането приключи',
-                                    'Открити са 3 синтетични учебни записа. Компютърът не е сканиран.')
+                self.notify_windows(self.system_text('Сканирането приключи','Scan completed'),
+                                    self.system_text('Открити са 3 заплахи. Прегледайте хронологията на защитата.',
+                                                     '3 threats were found. Review Protection history.'))
         e.update_view = update
         e.show()
 
+    def scene_protection_history(self):
+        e=self.effect(self.system_text('Защита на Windows','Windows Security'),820,555,
+                      bg='#f7f7f7',position='center',role='app',resizable=True)
+        if e is None:return
+        h={};state={'expanded':False,'acted':False}
+        def toggle():
+            state['expanded']=not state['expanded']
+            e.set_visible(h['details'],state['expanded'])
+            e.set_text(h['toggle'],self.system_text(
+                'Скрий подробностите' if state['expanded'] else 'Виж подробности',
+                'Hide details' if state['expanded'] else 'See details'))
+        def contain():
+            if state['acted']:return
+            state['acted']=True
+            self.scenario.apply_event(
+                ScenarioEvent.QUARANTINE_STARTED,
+                {'idempotency_key':f'quarantine:{self.scenario.chapter_generation}'})
+            e.set_text(h['status'],self.system_text(
+                'Действията започнаха • изолиране на компонентите на Block Runtime',
+                'Actions started • isolating Block Runtime components'))
+            e.set_enabled(h['action'],False)
+        def build(ui):
+            ui._add_label('☰',20,20,38,30,17,False,'#314250','#f7f7f7','Segoe UI')
+            ui._add_label(self.system_text('Защита на Windows','Windows Security'),66,18,300,32,18,True,'#25343f','#f7f7f7',self.windows_profile.font)
+            ui._add_label(self.system_text(
+                              'Начало\n\nЗащита от вируси и заплахи\n\nЗащита на акаунта\n\nЗащитна стена и мрежа\n\nУправление на приложения и браузър',
+                              'Home\n\nVirus & threat protection\n\nAccount protection\n\nFirewall & network protection\n\nApp & browser control'),
+                          24,76,205,360,10,False,'#344a5a','#edf1f4',self.windows_profile.font)
+            ui._add_label(self.system_text('Хронология на защитата','Protection history'),258,74,510,40,23,True,'#223746','#f7f7f7',self.windows_profile.font)
+            ui._add_label(self.system_text('Текущи заплахи','Current threats'),258,129,180,24,10,True,'#65727c','#f7f7f7',self.windows_profile.font)
+            ui._add_label('!',270,174,44,44,28,True,'#b22c3b','#fff4f4','Segoe UI')
+            ui._add_label(self.system_text('Открита заплаха — необходимо е действие','Threat found — action needed'),329,169,410,30,14,True,'#7f1e2b','#fff4f4',self.windows_profile.font)
+            ui._add_label(self.system_text('Trojan:Win32/CaveDepthsLoader\nЗасегнати елементи: 3','Trojan:Win32/CaveDepthsLoader\nAffected items: 3'),329,204,410,48,10,False,'#394b58','#fff4f4',self.windows_profile.font)
+            h['details']=ui._add_label(self.system_text(
+                'Произход: CaveDepths_Setup.exe\nПроцес: ModUpdateHelper.exe\nКомпонент: BlockRuntimeHost.exe\nПоведение: неочаквана файлова и мрежова активност',
+                'Origin: CaveDepths_Setup.exe\nProcess: ModUpdateHelper.exe\nComponent: BlockRuntimeHost.exe\nBehavior: unexpected file and network activity'),
+                                        270,277,468,96,9,False,'#435866','#e9eef2','Consolas')
+            h['status']=ui._add_label(self.system_text('Препоръчано действие: карантина','Recommended action: quarantine'),258,391,480,30,10,True,'#7f1e2b','#f7f7f7',self.windows_profile.font)
+            h['toggle']=ui._add_button(self.system_text('Виж подробности','See details'),258,458,140,36,self.guarded(toggle),False)
+            h['action']=ui._add_button(self.system_text('Стартирай действия','Start actions'),574,458,165,36,self.guarded(contain),True)
+        e.build_async(build,lambda:e.set_visible(h['details'],False));e.show()
+
+    def scene_properties(self):
+        e=self.effect(self.system_text('Свойства на CaveDepths_Setup.exe','CaveDepths_Setup.exe Properties'),610,520,bg='#f2f2f2',
+                      position='center',role='dialog')
+        if e is None:return
+        h={}
+        def certificate():
+            e.set_text(h['notice'],self.system_text(
+                'Windows не може да провери издателя на този файл.',
+                'Windows cannot verify the publisher of this file.'))
+            e.set_enabled(h['view'],False)
+        def build(ui):
+            ui._add_label(self.system_text('Общи     Защита     Подробности     Цифрови подписи','General     Security     Details     Digital Signatures'),18,15,560,34,10,False,'#273746','#f2f2f2',self.windows_profile.font)
+            ui._add_label(self.system_text('Цифрови подписи','Digital Signatures'),28,70,525,35,18,True,'#263c4a','#f2f2f2',self.windows_profile.font)
+            ui._add_label(self.system_text('Следният списък показва подписите, свързани с този файл:','The following list shows the signatures associated with this file:'),28,112,525,42,10,False,'#43515d','#f2f2f2',self.windows_profile.font)
+            ui._add_edit(self.system_text('Име на подписващия                    Алгоритъм             Времеви печат\r\n\r\nНяма цифрови подписи.','Name of signer                         Digest algorithm     Timestamp\r\n\r\nNo digital signatures are present.'),28,166,525,125,9,'#26343e','#ffffff')
+            ui._add_label(self.system_text('Информация за файла','File information'),28,314,200,25,10,True,'#314655','#f2f2f2',self.windows_profile.font)
+            ui._add_label(self.system_text('Тип: Приложение\nИме на продукт: CaveDepths Mod Setup\nВерсия на файла: 1.21.1.4\nИздател: Неизвестен','Type: Application\nProduct name: CaveDepths Mod Setup\nFile version: 1.21.1.4\nPublisher: Unknown'),28,345,360,96,10,False,'#3f4f5a','#f2f2f2',self.windows_profile.font)
+            h['notice']=ui._add_label(self.system_text('Състояние на подписа: Няма данни','Signature status: Not available'),392,345,165,55,9,True,'#9a2634','#f2f2f2',self.windows_profile.font)
+            h['view']=ui._add_button(self.system_text('Преглед на сертификата','View certificate'),371,405,180,34,self.guarded(certificate),False)
+            ui._add_button('OK',382,464,78,32,self.guarded(e.close),True)
+            ui._add_button(self.system_text('Отказ','Cancel'),470,464,82,32,self.guarded(e.close),False)
+        e.build_async(build);e.show()
+
+    def scene_network_activity(self):
+        e=self.effect('Network Activity',900,535,bg='#f5f6f7',position='center',role='app',resizable=True)
+        if e is None:return
+        h={};state={'blocked':False,'last':-1}
+        def block():
+            if state['blocked']:return
+            state['blocked']=True
+            self.scenario.apply_event(
+                ScenarioEvent.FIREWALL_BLOCKED,
+                {'idempotency_key':f'network-block:{self.scenario.chapter_generation}'})
+            e.set_text(h['status'],'Connection blocked for this incident trace')
+            e.set_enabled(h['block'],False)
+        def build(ui):
+            ui._add_label('Network Activity',22,18,430,36,21,True,'#233744','#f5f6f7',self.windows_profile.font)
+            h['status']=ui._add_label('Monitoring Block Runtime Host',22,60,600,26,10,False,'#536570','#f5f6f7',self.windows_profile.font)
+            h['table']=ui._add_edit('',22,103,850,270,10,'#24323b','#ffffff')
+            ui._add_label('Selected process',22,397,140,24,10,True,'#42535f','#f5f6f7',self.windows_profile.font)
+            ui._add_label('ModUpdateHelper.exe   PID 4820   Publisher: Unknown',165,397,510,24,10,False,'#2d3f4a','#f5f6f7','Consolas')
+            h['rate']=ui._add_label('Send 0.0 KB/s   Receive 0.0 KB/s',22,442,430,28,10,True,'#2f596f','#f5f6f7',self.windows_profile.font)
+            h['block']=ui._add_button('Block connection',700,432,172,36,self.guarded(block),True)
+            ui._add_label('Trace source: offline incident snapshot',22,497,400,22,9,False,'#6b7881','#f5f6f7',self.windows_profile.font)
+        e.build_async(build)
+        def update(t):
+            slot=int(t)
+            if slot==state['last']:return
+            state['last']=slot
+            rate=0.0 if state['blocked'] else 18.0+12.0*(.5+.5*math.sin(t*.7))
+            rows=('Process                  Remote address       Protocol   State\r\n'
+                  'ModUpdateHelper.exe      192.0.2.42:443       TCP        '
+                  f'{"Blocked" if state["blocked"] else "Established"}\r\n'
+                  'BlockRuntimeHost.exe     198.51.100.18:443    TCP        Waiting\r\n'
+                  'CaveDepths_Setup.exe     —                    —          Closed')
+            e.append_edit(h['table'],rows)
+            e.set_text(h['rate'],f'Send {rate:.1f} KB/s   Receive {rate*2.4:.1f} KB/s')
+        e.update_view=update;e.show()
+
+    def scene_recovery(self):
+        e=self.effect(self.system_text('PC Defender — Отстраняване','PC Defender — Remediation'),720,495,bg='#f6f8f9',position='center',role='app')
+        if e is None:return
+        self.scenario.apply_event(
+            ScenarioEvent.QUARANTINE_STARTED,
+            {'idempotency_key':f'recovery-quarantine:{self.scenario.chapter_generation}'})
+        self.scenario.apply_event(
+            ScenarioEvent.RECOVERY_STARTED,
+            {'idempotency_key':f'recovery-start:{self.scenario.chapter_generation}'})
+        self.close_tray_icon()
+        h={};state={'started':self.clock,'restored':0,'next':0.8,'done':False,'issue':None}
+        def open_folder():
+            if self.session:self.session.reveal_files()
+        def build(ui):
+            ui._add_label('PC DEFENDER',0,0,720,60,16,True,'#ffffff','#1f6e5a',self.windows_profile.font)
+            ui._add_label(self.system_text('Отстраняване на заплахи','Resolving threats'),34,88,520,38,22,True,'#223b44','#f6f8f9',self.windows_profile.font)
+            h['status']=ui._add_label(self.system_text('Спиране на ModUpdateHelper.exe…','Stopping ModUpdateHelper.exe…'),34,142,630,32,11,False,'#4b5e68','#f6f8f9',self.windows_profile.font)
+            h['bar']=ui._add_progress(34,194,650,24)
+            h['summary']=ui._add_label(self.system_text('Заплахи под карантина: 0 / 3\nВъзстановени имена: 0 / 8','Threats quarantined: 0 / 3\nFile names restored: 0 / 8'),34,247,650,70,13,True,'#245848','#ffffff',self.windows_profile.font)
+            h['detail']=ui._add_label(self.system_text('Подготовка за възстановяване…','Preparing recovery…'),34,338,650,42,10,False,'#536670','#f6f8f9',self.windows_profile.font)
+            h['folder']=ui._add_button(self.system_text('Отвори възстановените файлове','Open recovered files'),34,422,235,36,self.guarded(open_folder),False)
+            h['close']=ui._add_button(self.system_text('Затвори','Close'),584,422,100,36,self.guarded(e.close),True)
+            e.set_enabled(h['folder'],False);e.set_enabled(h['close'],False)
+        e.build_async(build)
+        def update(_t):
+            if state['done']:return
+            elapsed=max(0,self.clock-state['started'])
+            if elapsed<2:
+                e.set_progress(h['bar'],10+elapsed*10);return
+            if elapsed>=state['next']+2 and self.session:
+                restored,name=self.session.restore_next_file();state['next']+=1.05
+                if restored is True:
+                    state['restored']+=1;e.set_text(h['detail'],self.system_text('Възстановен: ','Restored: ')+name)
+                elif restored is False:
+                    state['issue']=name;state['done']=True
+                    e.set_text(h['status'],self.system_text('Възстановяването е спряно — файлът е променен','Recovery paused — file changed'))
+                    e.set_text(h['detail'],self.system_text(
+                        'Необходим е преглед; няма презаписани данни: ',
+                        'Needs inspection; no data was overwritten: ')+str(name))
+                    e.set_enabled(h['folder'],True);e.set_enabled(h['close'],True)
+            locked=(sum(locked.exists() for _,locked,_ in self.session.files)
+                    if self.session else self.scenario.locked_count)
+            self.scenario.apply_event(ScenarioEvent.FILES_LOCKED,{'count':locked})
+            quarantined=min(3,max(1,int(elapsed//2)))
+            progress=min(96,25+quarantined*12+state['restored']*5)
+            e.set_progress(h['bar'],progress)
+            e.set_text(h['summary'],self.system_text(
+                f'Заплахи под карантина: {quarantined} / 3\nВъзстановени имена: {state["restored"]} / 8',
+                f'Threats quarantined: {quarantined} / 3\nFile names restored: {state["restored"]} / 8'))
+            if not state['done'] and locked==0 and elapsed>=7:
+                state['done']=True;e.set_progress(h['bar'],100)
+                self.scenario.apply_event(
+                    ScenarioEvent.RECOVERY_COMPLETED,
+                    {'idempotency_key':f'recovery-complete:{self.scenario.chapter_generation}'})
+                e.set_text(h['status'],self.system_text('Отстраняването завърши','Remediation completed'))
+                e.set_text(h['detail'],self.system_text('Няма останали активни компоненти на Block Runtime.','No active Block Runtime components remain.'))
+                e.set_enabled(h['folder'],True);e.set_enabled(h['close'],True)
+                self.notify_windows('PC Defender',self.system_text(
+                    'Отстраняването завърши. 3 заплахи са поставени под карантина.',
+                    'Remediation completed. 3 threats were quarantined.'))
+        e.update_view=update;e.show()
+
     def scene_error(self):
         variants=[
-            ('Mod Update Helper is not responding',520,255,32513,'mod_update_helper.exe is not responding.','Windows can wait for the fictional program or close this demonstration window.','Wait','Close'),
-            ('Missing component',500,235,32515,'CaveDepths cannot start.','Required component fabric_runtime_demo.dll was not found. No real DLL was checked.','OK',None),
-            ('Access denied',470,245,32513,'The requested operation was denied.','Classroom process: bonus_agent.exe\nError code: DEMO-ACCESS-05','Close',None),
-            ('Fictional update failed',550,270,32515,'Browser Helper update was not completed.','The package signature in this classroom scenario is invalid.\nNo system update was attempted.','Retry demo','Cancel')]
+            ('Block Runtime Host',520,255,32513,'ModUpdateHelper.exe is not responding.','Windows can wait for the program to respond or close it.','Wait for the program','Close the program'),
+            ('CaveDepths',500,235,32515,'CaveDepths cannot start.','Required component block_runtime.dll was not found.','OK',None),
+            ('Block Runtime Host',470,245,32513,'The requested operation was denied.','Process: BlockRuntimeHost.exe\nError code: 0x80070005','Close',None),
+            ('Block Runtime Update',550,270,32515,'The update was not completed.','The package signature is invalid or cannot be verified.','Retry','Cancel')]
         index=getattr(self,'error_sequence',0)%len(variants);self.error_sequence=index+1
         title,width,height,icon,headline,body,primary,secondary=variants[index]
         e=self.effect(title,width,height,position='random',role='dialog')
@@ -2806,30 +3566,22 @@ class Classroom:
         e.build_async(build);e.show()
 
     def scene_ransom(self):
-        e=self.effect('Wana Decrypt0r — Classroom Reconstruction',930,620,bg='#f0eee9',position='center',role='app',resizable=True)
+        e=self.effect('Wana Decrypt0r 2.0',930,620,bg='#f0eee9',position='center',role='app',resizable=True)
         if e is None:return
-        h={};state={'notice':'No recovery key is available in this demonstration.'}
+        h={};state={'notice':'Recovery key status: not found.'}
         def check_key():
-            state['notice']='DEMO RESULT: nonpayable classroom ID; no key service contacted.';e.set_text(h['notice'],state['notice'])
-        def restore_demo():
-            issues=self.session.restore_files() if self.session else []
-            if self.session:
-                self.scenario.locked_count=sum(locked.exists() for _,locked,_ in self.session.files)
-            text='Names restored safely.' if not issues else 'Some classroom files need inspection.'
-            e.set_text(h['notice'],text);e.set_text(h['locked'],f'{self.scenario.locked_count} / 8')
+            state['notice']='The recovery service is unavailable. Try again later.';e.set_text(h['notice'],state['notice'])
         def build(ui):
-            ui._add_label('CLASSROOM\nRECONSTRUCTION',0,0,215,620,16,True,'#ffffff','#7a0f20','Segoe UI')
+            ui._add_label('WANA\nDECRYPT0R 2.0',0,0,215,620,16,True,'#ffffff','#7a0f20','Segoe UI')
             ui._add_label('PAYMENT DEADLINE',25,118,165,24,9,True,'#edc86d','#7a0f20','Segoe UI')
             h['timer']=ui._add_label('05:00',25,148,165,55,31,True,'#ffffff','#7a0f20','Consolas')
             ui._add_label('FILES MARKED .locked',25,245,165,30,9,True,'#edc86d','#7a0f20','Segoe UI')
             h['locked']=ui._add_label(f'{self.scenario.locked_count} / 8',25,280,165,45,23,True,'#ffffff','#7a0f20','Segoe UI')
             ui._add_label('Ooops, your files have been “encrypted”!',248,24,640,42,23,True,'#781323','#f0eee9','Segoe UI')
-            h['text']=ui._add_edit('What happened?\r\n\r\nThe classroom files were renamed with .locked. Their contents were not encrypted.\r\n\r\nWhy is there a timer?\r\n\r\nRansomware uses pressure and fear. Paying does not guarantee recovery.\r\n\r\nDemo ID: CLASSROOM-NONPAYABLE-0001\r\nPayment address: unavailable',248,84,640,330,10,'#30343a','#ffffff')
+            h['text']=ui._add_edit('What happened to my computer?\r\n\r\nYour important files are no longer available. Do not rename or move the affected files.\r\n\r\nCan I recover my files?\r\n\r\nA recovery key is required. The key service is currently unavailable.\r\n\r\nCase ID: CASE-2026-NONPAYABLE\r\nPayment service: unavailable',248,84,640,330,10,'#30343a','#ffffff')
             h['notice']=ui._add_label(state['notice'],248,435,640,52,10,False,'#6f2631','#f0eee9','Segoe UI')
-            ui._add_button('Check demo key',248,519,150,38,self.guarded(check_key),False)
-            ui._add_button('Restore classroom names',410,519,190,38,self.guarded(restore_demo),False)
-            ui._add_button('Close reconstruction',709,519,179,38,self.guarded(e.close),True)
-            ui._add_label('Educational reconstruction • no cryptography • no payment flow',248,577,640,24,9,False,'#735f63','#f0eee9','Segoe UI')
+            ui._add_button('Check recovery status',248,519,176,38,self.guarded(check_key),False)
+            ui._add_button('Close',760,519,128,38,self.guarded(e.close),True)
         e.build_async(build)
         def update(t):
             remaining=max(0,300-int(t));e.set_text(h['timer'],f'{remaining//60:02}:{remaining%60:02}')
@@ -2850,9 +3602,14 @@ class Stage:
         self.app = app
         self.win = tk.Toplevel(app.root)
         self.win.withdraw()
-        self.win.title('Дигитални детективи — демонстрационен екран')
-        sw, sh = self.win.winfo_screenwidth(), self.win.winfo_screenheight()
-        self.win.geometry(f'{min(1400,sw-60)}x{min(850,sh-90)}+25+25')
+        self.win.title('Windows')
+        left,top,right,bottom=app.presentation_monitor.monitor_rect
+        work_left,work_top,work_right,work_bottom=app.presentation_monitor.work_rect
+        if app.fullscreen.get():
+            self.win.geometry(f'{right-left}x{bottom-top}+{left}+{top}')
+        else:
+            width,height=min(1400,work_right-work_left-40),min(850,work_bottom-work_top-40)
+            self.win.geometry(f'{width}x{height}+{work_left+(work_right-work_left-width)//2}+{work_top+(work_bottom-work_top-height)//2}')
         self.win.configure(bg='#102441')
         self.win.attributes('-fullscreen', app.fullscreen.get())
         self.win.attributes('-topmost', True)
@@ -2882,6 +3639,7 @@ class Stage:
 
     def change(self, mode):
         self.mode = mode
+        self.win.attributes('-alpha',.62 if mode=='uac_dim' else 1.0)
         self.born = self.app.clock
         self.elapsed = 0
         self.recovery_notice = ''
@@ -2969,11 +3727,8 @@ class Stage:
         self.items={}
         renderer = {'ransom':self.ransom, 'blue':self.blue, 'reboot':self.reboot,
                     'debrief':self.debrief,
-                    'glitch_static':self.glitch_static}[self.mode]
+                    'glitch_static':self.glitch_static,'uac_dim':self.uac_dim}[self.mode]
         renderer()
-        self.rect(0,868,1600,32,'#132536')
-        self.text(16,875,'УЧЕБНА СИМУЛАЦИЯ  •  Esc: стоп  •  F6: следваща глава  •  Ctrl+Alt+Q: изход',
-                  13,'#d7e5ef',True,width=1500)
         self.update_dynamic()
 
     def update_dynamic(self):
@@ -3024,6 +3779,9 @@ class Stage:
         self.rect(659,710,892,64,'#630b1b')
         self.text(685,730,self.recovery_notice or 'No recovery key found.',20,'#eed1d7')
         self.text(358,826,'WannaCry (2017) • възстановка на външния вид • няма шифроване или плащане',19,'#e0a9b5')
+
+    def uac_dim(self):
+        self.rect(0,0,1600,900,'#111820')
 
     def glitch_static(self):
         self.rect(0,0,1600,900,'#152536')
@@ -3216,10 +3974,14 @@ class DesktopOverlay:
         try:
             self.win.withdraw()
             self.win.title('Дигитални детективи — екранен ефект')
-            sw, sh = self.win.winfo_screenwidth(), self.win.winfo_screenheight()
-            self.display_size = ((sw, sh) if app.fullscreen.get()
-                                 else (min(1400,sw-60), min(850,sh-90)))
-            self.win.geometry(f'{self.display_size[0]}x{self.display_size[1]}+25+25')
+            left,top,right,bottom=app.presentation_monitor.monitor_rect
+            work_left,work_top,work_right,work_bottom=app.presentation_monitor.work_rect
+            self.display_size = ((right-left,bottom-top) if app.fullscreen.get()
+                                 else (min(1400,work_right-work_left-60),
+                                       min(850,work_bottom-work_top-60)))
+            x=left if app.fullscreen.get() else work_left+25
+            y=top if app.fullscreen.get() else work_top+25
+            self.win.geometry(f'{self.display_size[0]}x{self.display_size[1]}+{x}+{y}')
             self.win.configure(bg='#101015')
             self.win.attributes('-fullscreen', app.fullscreen.get())
             self.win.attributes('-topmost', True)
@@ -3249,9 +4011,10 @@ class DesktopOverlay:
             if ImageGrab is None:
                 raise RuntimeError('Липсва Pillow. Изпълнете: py -m pip install pillow')
             try:
-                snapshot = ImageGrab.grab(all_screens=False, include_layered_windows=True)
+                snapshot = ImageGrab.grab(bbox=self.app.presentation_monitor.monitor_rect,
+                                          all_screens=True,include_layered_windows=True)
             except Exception as exc:
-                raise RuntimeError('Не мога да заснема основния монитор за ефекта. '
+                raise RuntimeError('Не мога да заснема избрания монитор за ефекта. '
                                    'Проверете дали работите в отворена Windows сесия. '
                                    'Подробностите са в журнала.') from exc
             try:
@@ -3293,9 +4056,6 @@ class DesktopOverlay:
         if self.image_item is None:
             self.image_item = self.canvas.create_image(self.canvas.winfo_width()/2,self.canvas.winfo_height()/2,
                                                         anchor='center',image=self.photo)
-            self.badge = self.canvas.create_text(14, 14, anchor='nw',
-                text='УЧЕБНА СИМУЛАЦИЯ  •  Ctrl+Alt+P пауза  •  Ctrl+Alt+Q изход',
-                font=('Segoe UI', 10, 'bold'), fill='white')
         else:
             self.canvas.itemconfigure(self.image_item, image=self.photo)
             self.canvas.coords(self.image_item,self.canvas.winfo_width()/2,self.canvas.winfo_height()/2)

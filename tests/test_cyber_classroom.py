@@ -19,7 +19,8 @@ import wave
 import cyber_classroom as classroom
 from classroom_core import (
     ABSOLUTE_MAX_EFFECTS, ABSOLUTE_MAX_TABS, BoundedEventBus, PauseClock,
-    PROFILES, RateLimiter, ScenarioState, retained_chapter_index,
+    DEFAULT_STORY_LABEL, PROFILES, STORY_PRESETS, RateLimiter, ScenarioEvent,
+    ScenarioState, retained_chapter_index,
 )
 
 
@@ -142,11 +143,40 @@ class ReliabilityPrimitiveTests(unittest.TestCase):
         times=[moment for moment,_ in classroom.TIMELINE]
         scenes={scene for _,scene in classroom.TIMELINE}
         self.assertEqual(times,sorted(times))
-        self.assertEqual(classroom.MASTER_DURATION,660)
-        self.assertTrue({'uac','firewall','taskmanager','updater','ransom','blue','reboot'} <= scenes)
+        self.assertEqual(classroom.MASTER_DURATION,900)
+        self.assertTrue({'download','uac','firewall','taskmanager','updater','protection_history',
+                         'ransom','recovery'} <= scenes)
+        self.assertFalse({'blue','reboot','glitch'} & scenes)
         self.assertNotIn('spyware',scenes)
         for scene in scenes-{'finish'}:
             self.assertTrue(hasattr(classroom.Classroom,'scene_'+scene),scene)
+
+    def test_story_presets_are_distinct_complete_graphs(self):
+        self.assertEqual(DEFAULT_STORY_LABEL,'15 минути')
+        self.assertEqual(set(STORY_PRESETS),{'10 минути','15 минути','20 минути'})
+        self.assertEqual([story.duration for story in STORY_PRESETS.values()],[600,900,1200])
+        lengths=[]
+        for label,story in STORY_PRESETS.items():
+            with self.subTest(label=label):
+                self.assertEqual(story.beats[-1].at,story.duration)
+                self.assertEqual(story.beats[-1].scene,'finish')
+                self.assertEqual(story.chapters[0][0],0)
+                self.assertEqual([beat.at for beat in story.beats],
+                                 sorted(beat.at for beat in story.beats))
+                lengths.append(len(story.beats))
+        self.assertEqual(lengths,[16,21,23])
+        self.assertIn('network_activity',{beat.scene for beat in STORY_PRESETS['20 минути'].beats})
+        self.assertNotIn('network_activity',{beat.scene for beat in STORY_PRESETS['10 минути'].beats})
+
+    def test_default_story_uses_the_approved_fixed_moments(self):
+        story=STORY_PRESETS['15 минути']
+        self.assertEqual([(beat.at,beat.scene) for beat in story.beats],[
+            (0,'browser'),(70,'download'),(100,'uac'),(130,'installer'),
+            (225,'helper'),(255,'notification'),(290,'tabs'),(330,'firewall'),
+            (370,'taskmanager'),(415,'updater'),(465,'error'),(500,'warning'),
+            (535,'scanner'),(610,'protection_history'),(655,'terminal_chapter'),
+            (710,'explorer'),(745,'files_chapter'),(785,'ransom'),
+            (835,'recovery'),(875,'debrief'),(900,'finish')])
 
     def test_profiles_and_absolute_caps(self):
         self.assertEqual(PROFILES['Училищен безопасен'].max_tabs,4)
@@ -188,11 +218,89 @@ class ReliabilityPrimitiveTests(unittest.TestCase):
         state.new_chapter(3);self.assertFalse(state.accepts(generation,chapter))
         state.invalidate();self.assertFalse(state.accepts(generation))
 
+    def test_scenario_events_are_idempotent_and_share_causal_state(self):
+        state=ScenarioState();generation=state.new_session()
+        self.assertTrue(state.apply_event(ScenarioEvent.DOWNLOAD_REQUESTED,generation=generation))
+        self.assertFalse(state.apply_event(ScenarioEvent.DOWNLOAD_REQUESTED,generation=generation))
+        self.assertTrue(state.apply_event(ScenarioEvent.INSTALL_COMPLETED,
+                                          {'idempotency_key':'install:1'},generation=generation))
+        self.assertEqual((state.phase,state.helper_state,state.tray_visible),('foothold','running',True))
+        self.assertTrue(state.apply_event(ScenarioEvent.FILES_LOCKED,{'count':5},generation=generation))
+        self.assertFalse(state.apply_event(ScenarioEvent.FILES_LOCKED,{'count':5},generation=generation))
+        self.assertTrue(state.apply_event(ScenarioEvent.FILES_LOCKED,{'count':8},generation=generation))
+        self.assertEqual(state.locked_count,8)
+        state.invalidate()
+        self.assertFalse(state.apply_event(ScenarioEvent.RECOVERY_STARTED,generation=generation))
+
+    def test_teacher_branch_controls_the_student_choice(self):
+        state=ScenarioState();state.new_session()
+        self.assertTrue(state.apply_event(ScenarioEvent.STUDENT_DECISION,
+                                          {'checkpoint':'uac','choice':'no','idempotency_key':'uac:no'}))
+        self.assertTrue(state.branch_pending)
+        self.assertTrue(state.apply_event(ScenarioEvent.TEACHER_ACCEPTED,
+                                          {'idempotency_key':'teacher:accept'}))
+        self.assertEqual(state.phase,'contained')
+        self.assertFalse(state.branch_pending)
+
+    def test_every_teacher_branch_choice_has_an_explicit_result(self):
+        for choice in ('no','cancel','block','stop'):
+            with self.subTest(choice=choice):
+                state=ScenarioState();state.new_session()
+                self.assertTrue(state.apply_event(ScenarioEvent.STUDENT_DECISION,
+                    {'checkpoint':choice,'choice':choice,'idempotency_key':f'decision:{choice}'}))
+                self.assertFalse(state.apply_event(ScenarioEvent.STUDENT_DECISION,
+                    {'checkpoint':choice,'choice':choice,'idempotency_key':f'decision:{choice}'}))
+                self.assertTrue(state.apply_event(ScenarioEvent.TEACHER_ACCEPTED,
+                    {'idempotency_key':f'accept:{choice}'}))
+                self.assertEqual(state.phase,'contained')
+                self.assertFalse(state.branch_pending)
+        state=ScenarioState();state.new_session()
+        state.apply_event(ScenarioEvent.STUDENT_DECISION,
+                          {'checkpoint':'uac','choice':'yes','idempotency_key':'decision:yes'})
+        self.assertTrue(state.apply_event(ScenarioEvent.TEACHER_COMPROMISED,
+                                         {'phase':'execution','idempotency_key':'force:yes'}))
+        self.assertEqual(state.phase,'execution');self.assertFalse(state.branch_pending)
+
+    def test_story_rebuild_invalidates_old_callbacks_and_projects_prior_beats(self):
+        state=ScenarioState();old_generation=state.new_session()
+        generation=state.rebuild_for_story(
+            ['download','uac','installer','helper','firewall','warning','scanner',
+             'terminal_chapter','files_chapter'],6,locked_count=8)
+        self.assertNotEqual(generation,old_generation)
+        self.assertFalse(state.accepts(old_generation))
+        self.assertEqual(state.chapter_index,6)
+        self.assertEqual(state.download_stage,'completed')
+        self.assertEqual(state.installer_stage,'completed')
+        self.assertEqual(state.helper_state,'running')
+        self.assertEqual(state.firewall_state,'allowed')
+        self.assertEqual(state.scanner_stage,'completed')
+        self.assertEqual(state.terminal_stage,'completed')
+        self.assertEqual(state.locked_count,8)
+
+    def test_story_rebuild_after_recovery_is_consistently_clean(self):
+        state=ScenarioState()
+        state.rebuild_for_story(
+            ['download','installer','helper','warning','scanner','files_chapter','recovery'],
+            9,locked_count=0)
+        self.assertEqual(state.phase,'recovered')
+        self.assertEqual(state.recovery_stage,'completed')
+        self.assertEqual(state.quarantine_state,'completed')
+        self.assertEqual(state.locked_count,0)
+        self.assertFalse(state.tray_visible)
+
     def test_chapter_index_supports_skipping(self):
         self.assertEqual(retained_chapter_index(0,classroom.CHAPTERS),0)
-        self.assertEqual(retained_chapter_index(255,classroom.CHAPTERS),3)
-        self.assertEqual(retained_chapter_index(475,classroom.CHAPTERS),7)
+        self.assertEqual(retained_chapter_index(255,classroom.CHAPTERS),2)
+        self.assertEqual(retained_chapter_index(475,classroom.CHAPTERS),3)
         self.assertEqual(retained_chapter_index(999,classroom.CHAPTERS),len(classroom.CHAPTERS)-1)
+
+    def test_windows_profile_detection_is_deterministic(self):
+        win10=classroom.detect_windows_profile(build=19045,language_id=0x0409)
+        win11=classroom.detect_windows_profile(build=22631,language_id=0x0402)
+        self.assertEqual((win10.generation,win10.language,win10.rounded_corners),
+                         ('windows10','en',False))
+        self.assertEqual((win11.generation,win11.language,win11.rounded_corners),
+                         ('windows11','bg',True))
 
 
 class NativeSessionTests(unittest.TestCase):
@@ -224,6 +332,35 @@ class NativeSessionTests(unittest.TestCase):
         self.assertIn(locked.name,issues)
         self.assertEqual(plain.read_text(encoding='utf-8'),'Учителски конфликт')
         self.assertTrue(locked.exists())
+
+    def test_recovery_restores_at_most_one_owned_file_per_step(self):
+        self.session.lock_files(3)
+        restored,name=self.session.restore_next_file()
+        self.assertTrue(restored);self.assertTrue(name.endswith('.txt'))
+        self.assertEqual(sum(locked.exists() for _,locked,_ in self.session.files),2)
+
+    def test_step_recovery_never_overwrites_a_conflicting_plain_file(self):
+        plain,locked,_=self.session.files[0]
+        self.session.lock_files(1)
+        plain.write_text('Запази тази учителска промяна',encoding='utf-8')
+        restored,name=self.session.restore_next_file()
+        self.assertFalse(restored);self.assertEqual(name,locked.name)
+        self.assertEqual(plain.read_text(encoding='utf-8'),'Запази тази учителска промяна')
+        self.assertTrue(locked.exists())
+
+    def test_browser_uses_selected_monitor_bounds(self):
+        class FakeJob:
+            def __init__(self):self.launches=[]
+            def launch(self,exe,args):self.launches.append(args)
+        class FakePages:
+            def url(self,index):return f'http://127.0.0.1/local/{index}'
+        self.session.executable=Path('C:/fake/msedge.exe')
+        self.session.presentation_bounds=(-1920,0,0,1040)
+        self.session.job=FakeJob();self.session.pages=FakePages();self.session.browser_ready=True
+        self.assertTrue(self.session.open_tab())
+        args=self.session.job.launches[0]
+        self.assertIn('--window-position=-1920,0',args)
+        self.assertIn('--window-size=1920,1040',args)
 
     def test_reports_a_generated_file_that_was_removed(self):
         plain, locked, _ = self.session.files[0]
@@ -367,14 +504,17 @@ class NativeEffectAcceptanceTests(unittest.TestCase):
         app.hotkeys_ok=True;app.running=True;app.mode='manual';app.scenario.new_session()
         app.session=classroom.NativeSession(max_tabs=4,generation=app.scenario.generation)
         try:
-            scenes=(app.scene_uac,app.scene_installer,app.scene_notification,app.scene_warning,
-                    app.scene_firewall,app.scene_taskmanager,app.scene_updater,app.scene_advert,
-                    app.scene_terminal,app.scene_scanner,app.scene_error,app.scene_ransom)
+            scenes=(app.scene_download,app.scene_uac,app.scene_installer,app.scene_notification,
+                    app.scene_warning,app.scene_firewall,app.scene_taskmanager,app.scene_updater,
+                    app.scene_advert,app.scene_terminal,app.scene_scanner,app.scene_properties,
+                    app.scene_protection_history,app.scene_network_activity,app.scene_ransom,
+                    app.scene_recovery)
             for scene in scenes:
                 app.limiter.reset();scene();root.update()
                 app.clock+=.2
                 for effect in list(app.effects):effect.tick()
                 app.clear_effects()
+                app.close_stage()
                 deadline=time.monotonic()+.3
                 while time.monotonic()<deadline and any(e.thread.is_alive() for e in app.closing_effects):
                     root.update();time.sleep(.01)
@@ -387,6 +527,15 @@ class NativeEffectAcceptanceTests(unittest.TestCase):
             self.assertEqual(app.live_effect_count(),0)
         finally:
             app.close()
+
+    def test_owned_tray_icon_has_bounded_lifecycle(self):
+        events=BoundedEventBus();tray=classroom.OwnedTrayIcon(events,'Block Runtime Host')
+        try:
+            self.assertTrue(tray.ready.wait(1.5))
+            self.assertIsNotNone(tray.hwnd)
+        finally:
+            tray.close()
+        self.assertFalse(tray.thread.is_alive())
 
 
 @unittest.skipIf(classroom.Image is None,'Pillow is not installed')
