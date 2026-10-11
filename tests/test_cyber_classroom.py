@@ -15,12 +15,14 @@ import unittest
 import urllib.error
 import urllib.request
 import wave
+import xml.etree.ElementTree as ET
 
 import cyber_classroom as classroom
 from classroom_core import (
     ABSOLUTE_MAX_EFFECTS, ABSOLUTE_MAX_TABS, BoundedEventBus, PauseClock,
     DEFAULT_STORY_LABEL, PROFILES, STORY_PRESETS, RateLimiter, ScenarioEvent,
-    ScenarioState, retained_chapter_index,
+    ScenarioState, SignalChannel, SurfaceVariant, NotificationSpec,
+    build_session_mix, new_mix_code, normalize_mix_code, retained_chapter_index,
 )
 
 
@@ -92,6 +94,31 @@ class LocalPagesTests(unittest.TestCase):
                 self.pages.server.handle_error(None,('127.0.0.1',12345))
         self.assertEqual(output.getvalue(),'')
 
+    def test_controlled_browser_signal_and_close_sequence_are_state_driven(self):
+        spec=next(item for item in build_session_mix('15 минути','CAVE42').signals
+                  if item.channel is SignalChannel.BROWSER)
+        self.pages.set_browser_signal(spec,'bg')
+        state_url=(f'http://127.0.0.1:{self.pages.server.server_port}/'
+                   f'{self.pages.token}/state')
+        with urllib.request.urlopen(state_url,timeout=3) as response:
+            state=json.loads(response.read())
+        self.assertEqual(state['browser_signal']['id'],spec.signal_id)
+        self.assertEqual(state['browser_signal']['layout'],spec.surface.layout_id)
+        self.pages.request_notification_close()
+        with urllib.request.urlopen(state_url,timeout=3) as response:
+            closed=json.loads(response.read())
+        self.assertIsNone(closed['browser_signal'])
+        self.assertEqual(closed['notification_close_sequence'],1)
+
+    def test_manual_web_notification_page_is_explicit_local_and_closeable(self):
+        with urllib.request.urlopen(self.pages.web_notification_url(),timeout=3) as response:
+            page=response.read().decode('utf-8')
+        self.assertIn('Notification.requestPermission()',page)
+        self.assertIn('window.classroomNotifications',page)
+        self.assertIn('item.close()',page)
+        self.assertIn('LOCALHOST',page)
+        self.assertNotIn('https://',page)
+
 
 class SoundBankTests(unittest.TestCase):
     def test_generated_wav_and_exact_name_custom_override(self):
@@ -136,6 +163,83 @@ class WindowsToastTests(unittest.TestCase):
         self.assertIn("$toast.ExpirationTime",script)
         self.assertNotIn('http://',script)
         self.assertNotIn('https://',script)
+
+    def test_adaptive_layouts_are_distinct_valid_and_escape_user_text(self):
+        layouts=('text_fallback','adaptive_compact','adaptive_warning','adaptive_summary','adaptive_success')
+        payloads=[classroom.WindowsToastNotifier.toast_xml(
+            'A < B & C','Teacher says "review"',layout) for layout in layouts]
+        self.assertEqual(len(set(payloads)),len(layouts))
+        for payload in payloads:
+            ET.fromstring(payload)
+            self.assertIn('A &lt; B &amp; C',payload)
+            self.assertNotIn('<script',payload.lower())
+        self.assertIn('template="ToastText02"',payloads[0])
+
+
+class SessionMixTests(unittest.TestCase):
+    def test_three_thousand_seeded_mixes_satisfy_model_invariants(self):
+        alphabet='ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
+        checked=0
+        for story in STORY_PRESETS:
+            for number in range(1000):
+                value=number;characters=[]
+                for _ in range(6):
+                    characters.append(alphabet[value%len(alphabet)])
+                    value=value//len(alphabet)+7
+                mix=build_session_mix(story,''.join(characters))
+                self.assertEqual(mix.story_label,story)
+                checked+=1
+        self.assertEqual(checked,3000)
+
+    def test_same_code_and_preset_replay_exactly_and_other_code_changes_mix(self):
+        first=build_session_mix('15 минути','CAVE42')
+        replay=build_session_mix('15 минути','CAVE42')
+        other=build_session_mix('15 минути','DEPTH7')
+        self.assertEqual(first,replay)
+        self.assertNotEqual(first.signals,other.signals)
+
+    def test_signal_counts_channels_spacing_and_nonrepetition(self):
+        expected={'10 минути':9,'15 минути':13,'20 минути':16}
+        phase_windows={
+            '10 минути':{'delivery':(0,80),'install':(80,180),'foothold':(180,280),
+                         'symptoms':(280,420),'recovery':(540,600)},
+            '15 минути':{'delivery':(0,100),'install':(100,225),'foothold':(225,370),
+                         'symptoms':(370,500),'detection':(500,655),'recovery':(835,875)},
+            '20 минути':{'delivery':(0,125),'install':(125,280),'foothold':(280,460),
+                         'symptoms':(460,625),'detection':(625,750),
+                         'investigation':(750,965),'impact':(965,1050),
+                         'recovery':(1110,1170)},
+        }
+        for story,count in expected.items():
+            for code in ('CAVE42','DEPTH7','M1XBAD'.replace('1','2'),'7H2K9M'):
+                with self.subTest(story=story,code=code):
+                    mix=build_session_mix(story,code)
+                    self.assertEqual(len(mix.signals),count)
+                    self.assertEqual(len({item.channel for item in mix.signals}),5)
+                    self.assertEqual(len({item.uniqueness_key for item in mix.signals}),count)
+                    for previous,current in zip(mix.signals,mix.signals[1:]):
+                        self.assertGreaterEqual(current.at-previous.at,8)
+                        self.assertNotEqual(previous.channel,current.channel)
+                        self.assertNotEqual(previous.surface.icon_id,current.surface.icon_id)
+                        self.assertNotEqual(previous.surface.severity,current.surface.severity)
+                        self.assertNotEqual(previous.surface.sound_id,current.surface.sound_id)
+                    toast_times=[item.at for item in mix.signals
+                                 if item.channel is SignalChannel.NOTIFICATION_CENTER]
+                    self.assertTrue(all(b-a>=20 for a,b in zip(toast_times,toast_times[1:])))
+                    for item in mix.signals:
+                        low,high=phase_windows[story][item.phase]
+                        self.assertLessEqual(low,item.at)
+                        self.assertLess(item.at,high)
+
+    def test_mix_codes_are_six_safe_characters_and_normalize_separators(self):
+        self.assertEqual(normalize_mix_code('ca-ve 42'),'CAVE42')
+        for _ in range(20):
+            code=new_mix_code()
+            self.assertEqual(len(code),6)
+            self.assertFalse(set(code)&set('IO01'))
+        for invalid in ('short','OOOOOO','ABC*23'):
+            with self.assertRaises(ValueError):
+                normalize_mix_code(invalid)
 
 
 class ReliabilityPrimitiveTests(unittest.TestCase):
@@ -362,6 +466,18 @@ class NativeSessionTests(unittest.TestCase):
         self.assertIn('--window-position=-1920,0',args)
         self.assertIn('--window-size=1920,1040',args)
 
+    def test_manual_notification_launch_uses_only_the_local_owned_page(self):
+        class FakeJob:
+            def __init__(self):self.launches=[]
+            def launch(self,exe,args):self.launches.append(args)
+        class FakePages:
+            def web_notification_url(self):return 'http://127.0.0.1/manual-notification'
+        self.session.executable=Path('C:/fake/msedge.exe')
+        self.session.job=FakeJob();self.session.pages=FakePages();self.session.browser_ready=True
+        self.assertTrue(self.session.open_web_notification())
+        self.assertEqual(self.session.job.launches[0][-1],
+                         'http://127.0.0.1/manual-notification')
+
     def test_reports_a_generated_file_that_was_removed(self):
         plain, locked, _ = self.session.files[0]
         self.session.lock_files(1);locked.unlink()
@@ -519,6 +635,16 @@ class NativeEffectAcceptanceTests(unittest.TestCase):
                 while time.monotonic()<deadline and any(e.thread.is_alive() for e in app.closing_effects):
                     root.update();time.sleep(.01)
                 app.closing_effects[:]=[e for e in app.closing_effects if e.thread.is_alive()]
+            for index,layout in enumerate(('defender_card','inline_banner','legacy_balloon','compact_toast')):
+                spec=NotificationSpec(
+                    f'native-signal-{index}',10+index*10,'smoke',SignalChannel.IN_APP,
+                    'CaveDepths','Учебен сигнал','Classroom signal',
+                    'Различима контролирана повърхност.','Distinct controlled surface.',
+                    SurfaceVariant(layout,('shield','update','error','info')[index],
+                                   ('warning','caution','error','info')[index],
+                                   ('warning','updater','error','notification')[index]))
+                app.limiter.reset();self.assertTrue(app.scene_signal(spec));root.update()
+                app.clear_effects()
             app.fullscreen.set(False);app.stage_mode('blue');root.update()
             self.assertEqual(app.stage.mode,'blue')
             app.clock+=20;app.stage.tick();root.update()
@@ -533,9 +659,28 @@ class NativeEffectAcceptanceTests(unittest.TestCase):
         try:
             self.assertTrue(tray.ready.wait(1.5))
             self.assertIsNotNone(tray.hwnd)
+            self.assertTrue(tray.set_tooltip('Block Runtime • scan pending'))
+            self.assertTrue(tray.show_balloon('Scan result','Three classroom findings','warning'))
         finally:
             tray.close()
         self.assertFalse(tray.thread.is_alive())
+
+    def test_taskbar_progress_is_owned_and_clearable(self):
+        class FakeApp:
+            clock=0.0;rng=random.Random(12);events=BoundedEventBus()
+        effect=classroom.NativeEffect(FakeApp(),'Taskbar test',380,180,role='app')
+        taskbar=classroom.TaskbarController()
+        try:
+            self.assertTrue(effect.ready.wait(1.0))
+            self.assertIsNotNone(effect.hwnd)
+            if not taskbar.available:
+                self.skipTest('ITaskbarList3 is unavailable')
+            self.assertTrue(taskbar.signal(effect.hwnd,'scan_progress',1.0))
+            self.assertTrue(taskbar.active)
+            taskbar.clear(effect.hwnd)
+            self.assertFalse(taskbar.active)
+        finally:
+            taskbar.close();effect.close();effect.wait_closed(1)
 
 
 @unittest.skipIf(classroom.Image is None,'Pillow is not installed')

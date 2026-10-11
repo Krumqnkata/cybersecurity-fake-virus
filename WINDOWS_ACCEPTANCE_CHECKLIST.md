@@ -1,4 +1,4 @@
-# Windows acceptance checklist — Cyber Classroom 8.0
+# Windows acceptance checklist — CaveDepths / Cyber Classroom 8.1
 
 Този checklist е ръчен и opt-in. Изпълнете го на конкретния presentation компютър преди урок. Не използвайте личен браузърен профил или чувствителни отворени документи.
 
@@ -13,6 +13,7 @@
 - [ ] Sensitive windows са затворени преди screen snapshot сцената.
 - [ ] Тест без интернет: шестте localhost страници и бутоните им работят; няма external requests от supplied content.
 - [ ] При включено „Windows известия“ се появява локален toast в Notification Center; при изключена отметка не се изпраща. Stop/изход премахва само записите от собствената `classroom-demo` група. Проверете и при Focus Assist / Do Not Disturb.
+- [ ] Windows 11 показва различими compact/warning/scan/recovery adaptive toasts; Windows 10 използва четим text fallback. Няма неработещи action бутони.
 
 ## Emergency controls
 
@@ -32,6 +33,8 @@
 - [ ] Runtime updater: staged progress, Cancel и Completed; не се инсталира компонент.
 - [ ] Toast: не взема focus, има timestamp, Details и dismiss; stacking остава в profile cap.
 - [ ] Tray helper: временната икона има работещи Open status и Exit helper; изчезва при Stop, recovery и изход.
+- [ ] Tray info/warning/error balloons имат различни икони и tooltip/status; нито един tray callback не променя UI от чужд thread.
+- [ ] Taskbar progress/paused/error/attention се виждат само върху собствените прозорци и се изчистват при Pause, Stop и затваряне.
 - [ ] Warning: Show/Hide details реално resize-ва и показва/скрива съдържанието.
 - [ ] Error wall: виждат се поне четирите варианта без infinite replacement.
 - [ ] Terminal: resizable, bounded output, pauses with scenario clock, никакъв shell process.
@@ -49,6 +52,17 @@
 - [ ] „Приеми резултата“ при безопасно действие преминава към debrief; „Покажи компрометирания път“ продължава причинната история.
 - [ ] Replay на глава преди/по време/след файловото въздействие синхронизира прозорците, броя `.locked` имена, tray и scanner state.
 
+## Код и сигнален микс
+
+- [ ] Нов автоматичен Start след Stop създава нов шестзнаков код; „Нов микс“ също го сменя.
+- [ ] „Приложи“ приема валиден код без I/O/0/1; невалиден код дава ясно съобщение и не стартира.
+- [ ] Един код + един preset възпроизвежда същите текстове, layout-и, икони, звуци и ред; „Повтори глава“ не сменя кода.
+- [ ] 10/15/20 минути дават точно 9/13/16 вторични сигнала. Статусът показва доставени/общо.
+- [ ] Всеки preset използва browser, in-app, taskbar, tray и Notification Center; няма два съседни сигнала от един канал.
+- [ ] Няма съседно повторение на severity, икона или звук и няма повторена layout/text/icon/sound комбинация.
+- [ ] Между два сигнала има поне 8 секунди, между Notification Center записи поне 20 секунди и няма повече от два видими едновременно.
+- [ ] При забранен toast/tray/taskbar/browser се използва различим in-app fallback, без загуба на следващите събития.
+
 ## Browser и failure paths
 
 - [ ] Един owned browser window и максимум 4 tabs в School Safe.
@@ -58,6 +72,9 @@
 - [ ] Ръчно затворен owned browser дава useful fallback и не се отваря безконтролно отново.
 - [ ] Managed `UserDataDir` policy отказва сцената; няма fallback към default profile.
 - [ ] Missing browser и failed launch показват Bulgarian explanation и историята остава контролируема.
+- [ ] Controlled browser signals са различими като download shelf, permission chip, account banner и update strip и се махат автоматично.
+- [ ] Ръчният „Истинско browser известие“ работи само през localhost, иска Allow едва след учителски клик и обработва отказа видимо.
+- [ ] Stop извиква best-effort `.close()` на browser notification обектите преди private Job/profile cleanup; отчетено е, че browser-owned history entry може да остане.
 
 ## Files и visual scenes
 
@@ -72,6 +89,7 @@
 ## Повтаряемост и ресурси
 
 - [ ] 10 цикъла Start → Pause → Replay → Next → Stop без останали owned windows/threads.
+- [ ] При Pause не се създават нови сигнали, звукът и taskbar attention спират, а Resume не наваксва с burst.
 - [ ] 10 цикъла на всяка native сцена; USER/GDI handles се връщат близо до baseline.
 - [ ] Python working set и owned browser Job peak са записани; няма монотонен необясним растеж.
 - [ ] Event-loop delay остава приемлив на целевия компютър; emergency controls реагират.

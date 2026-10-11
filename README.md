@@ -1,4 +1,4 @@
-# Дигитални детективи — Cyber Classroom 8.0
+# Дигитални детективи — CaveDepths / Cyber Classroom 8.1
 
 Учителско приложение за визуална демонстрация на признаци, които могат да се срещнат при компютърен инцидент. Сцените изглеждат като отделни Windows приложения, но не извършват зловредни действия.
 
@@ -22,9 +22,22 @@ py cyber_classroom.py
 3. Изберете ресурсен профил. **„Училищен безопасен“** е препоръчаният и стандартен избор.
 4. Изберете продължителност **10, 15 или 20 минути**. Стандартната причинно свързана история е 15 минути; трите варианта имат различни сцени, а не само различна скорост.
 5. Изберете презентационен монитор и **„Автоматично“** или **„Учителско темпо“**.
-6. В учителски режим отговаряйте на решенията с **„Приеми резултата“** или **„Покажи компрометирания път“**.
-7. Преди RAM-only кадъра затворете чувствителни прозорци на избрания монитор.
-8. Направете пълна проба на конкретния демонстрационен компютър.
+6. По желание запишете шестзнаковия **код на микса**. **„Приложи“** възпроизвежда код от друг час, а **„Нов микс“** създава нов вариант. „Повтори глава“ запазва текущия код.
+7. В учителски режим отговаряйте на решенията с **„Приеми резултата“** или **„Покажи компрометирания път“**.
+8. Преди RAM-only кадъра затворете чувствителни прозорци на избрания монитор.
+9. Направете пълна проба на конкретния демонстрационен компютър.
+
+## Възпроизводими комуникационни миксове
+
+Цялата сесия се изгражда предварително от кода и избрания preset. Ново автоматично Start след завършена сесия избира нов код; **„Повтори глава“** възпроизвежда същите текстове, оформления, икони, звуци и ред. Един и същ код плюс една и съща продължителност дават същия микс и на друг компютър.
+
+- 10 минути: точно 9 вторични сигнала;
+- 15 минути: точно 13 вторични сигнала;
+- 20 минути: точно 16 вторични сигнала;
+- във всеки preset участват browser UI, различни in-app повърхности, taskbar progress/attention, tray balloons и Windows Notification Center;
+- между сигналите има поне 8 секунди, а между Notification Center записи — поне 20 секунди;
+- съседни сигнали никога не повтарят канал, severity, икона или звук; цялата комбинация layout/text/icon/sound е уникална за сесията;
+- разместването е само вътре в причинната фаза и не може да изпревари prerequisite събитие.
 
 ## Ресурсни профили
 
@@ -64,7 +77,7 @@ py cyber_classroom.py
 
 Всеки сигнал може да бъде заменен: поставете PCM WAV файл с точното име в папка `sounds` до `cyber_classroom.py`. Поддържаните имена и препоръките са описани в [sounds/README.md](sounds/README.md). При пауза, **„Спри / изчисти“**, изключване на отметката или изход текущият звук спира веднага.
 
-Опцията **„Windows известия“** е включена по подразбиране и изпраща реални локални toast известия през Windows Notification Center при подозрителната активност, края на сканирането и възстановяването. Те нямат бутони, линкове или команди, rate-limited са, изтичат автоматично и записите от собствената `classroom-demo` група се премахват при Stop/изход. Изключването оставя само вътрешната notification сцена. Focus Assist, Do Not Disturb или училищна групова политика може да скрие банера, без да прекъсне историята.
+Опцията **„Windows известия“** е включена по подразбиране. Windows 11 използва отделни compact, warning, scan-summary и recovery adaptive оформления; Windows 10 получава съвместим `ToastText02` вариант. Известията нямат подвеждащи action бутони, линкове или команди, rate-limited са, изтичат автоматично и записите от собствената `classroom-demo` група се премахват при Stop/изход. При отказ, Focus Assist, Do Not Disturb или policy се избира неизползван in-app fallback, без прекъсване на историята.
 
 ## Различните учебни интерфейси
 
@@ -73,7 +86,7 @@ py cyber_classroom.py
 - **Firewall warning** — свързано предупреждение за `ModUpdateHelper.exe`, private/public network choices и видим резултат без създаване на firewall rule.
 - **Task Manager view** — resizable process table с променящи се CPU, Disk, Network и GPU стойности и работещо спиране на измисления процес. Данните са предварително записани; не се изброяват реални процеси.
 - **Block Runtime updater** — отделен staged updater с fictional signature check, progress, Cancel и Completed състояние; не инсталира компонент.
-- **Tray helper и Notification** — временна истинска notification-area икона с Open status/Exit helper, малък `WS_EX_NOACTIVATE` toast и опционално истинско известие в Windows Notification Center. Всички са application-owned и се почистват при Stop.
+- **Tray helper, taskbar и Notification Center** — временна истинска notification-area икона с Open status/Exit helper и thread-safe info/warning/error balloons; taskbar progress/attention се прилага само към собствени прозорци; Notification Center има отделни оформления. Всички owned състояния се чистят при Pause/Stop/изход.
 - **Security warning** — отделен restrained dialog с fictional process, severity и работещи разширяеми technical details.
 - **Application errors** — четири авторски варианта: not responding, missing component, access denied и failed update.
 - **Classroom Terminal** — resizable native прозорец, Consolas, bounded prerecorded scrollback и неравномерно време. Не се стартира shell и не се изпълнява команда.
@@ -95,6 +108,8 @@ Edge/Chrome се стартира със собствен нов времене�
 Ако организационна `UserDataDir` политика е зададена, сцената отказва да я заобиколи и показва обяснение. Няма fallback към нормалния профил.
 
 Съдържанието се обслужва само на `127.0.0.1` със случаен 40-hex route. CSP забранява външни ресурси; има само inline локални styles/script с nonce и data-URI favicons. Командите са allowlisted, generation-tagged, rate-limited и са само POST с празно body. Видимите страници poll-ват приблизително на 1 секунда, hidden страниците — на 5 секунди, а при прекъсване backoff-ват до 10 секунди.
+
+Основната история показва контролирани browser-native download shelf, permission chip, account banner, unread title/favicon и update strip. Отделният ръчен бутон **„Истинско browser известие“** отваря localhost страница и иска `Allow` само след учителски клик. Създадените `Notification` обекти се пазят и `.close()` се извиква преди browser cleanup; въпреки това browser-owned запис в Notification Center може да остане и страницата предупреждава за това.
 
 Chromium flags като `--disable-background-networking` ограничават фоновата работа, но **не са пълна network sandbox**. Самите предоставени страници и assets работят без интернет и нямат външни URL-и. Проверете disconnected operation на конкретната училищна конфигурация; managed browser компоненти могат да имат собствено поведение извън контрола на приложението.
 
@@ -149,12 +164,12 @@ $env:CYBER_CLASSROOM_NATIVE_TESTS='1'
 py -m unittest tests.test_cyber_classroom.NativeEffectAcceptanceTests -v
 ```
 
-Проверяват се трите story графа, causal replay, учителски разклонения, stale generation events, duplicate start, pause clock, loopback validation/rate limit, six distinct pages, monitor browser positioning, tray lifecycle, strict file conflicts, поетапно recovery, bounded image size, native keyboard bridge, всички native scene builders и regression сценарият Tk mainloop + HTTP thread + ctypes Win32 callback под Python 3.13.
+Проверяват се трите story графа, 9/13/16 signal counts, 3000 детерминирани mix варианта, stable Replay, забраните за съседно повторение, adaptive toast XML/escaping, controlled browser surfaces, localhost-only Web Notification, учителски разклонения, stale generation events, pause clock, tray balloons, taskbar progress, strict file conflicts, recovery и Python 3.13 callback lifecycle.
 
-При разработката на 8.0 са изпълнени:
+При разработката на 8.1 са изпълнени:
 
-- 40 default-discovery tests: успешно, 5 opt-in Win32 tests пропуснати по дизайн;
-- 5 opt-in Win32 tests: успешно, включително tray lifecycle и 10 native lifecycle цикъла без unbounded USER/GDI handle growth;
+- 49 default-discovery tests: успешно, 6 opt-in Win32 tests пропуснати по дизайн;
+- 6 opt-in Win32 tests: успешно, включително tray balloons, taskbar progress и 10 native lifecycle цикъла без unbounded USER/GDI handle growth;
 - 300 ms реален Tk panel startup/cleanup smoke test: успешно;
 - `py -m py_compile`: успешно.
 
@@ -170,6 +185,14 @@ Bounded synthetic Pillow benchmark на наличната development маши�
 - File Explorer прозорецът и учебната папка остават за обсъждане.
 - Force-kill на Python или изключване на компютъра може да прекъсне normal filename restoration.
 - Реалният браузър, DPI 200%, taskbar/work-area placement и handle growth трябва да се проверят на конкретната presentation машина.
+
+## Changelog 8.1
+
+- Детерминиран `SessionMix` с шестзнаков код, „Приложи“, „Нов микс“ и stable chapter Replay.
+- Точно 9/13/16 вторични сигнала през пет канала с phase windows и правила против повторение.
+- Четири контролирани browser повърхности и отделен opt-in localhost Web Notification казус.
+- Adaptive Windows 11 toasts, Windows 10 text fallback, native tray balloons и owned taskbar progress/attention.
+- Pause/Stop cleanup за taskbar, звуци, tray, toast group, browser notifications, прозорци и временен профил.
 
 ## Changelog 8.0
 

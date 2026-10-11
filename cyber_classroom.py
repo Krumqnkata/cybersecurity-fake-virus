@@ -38,6 +38,7 @@ from array import array
 import base64
 from dataclasses import dataclass
 import hashlib
+import html
 import math
 import json
 import logging
@@ -60,7 +61,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from classroom_core import (
     ABSOLUTE_MAX_EFFECTS, ABSOLUTE_MAX_TABS, BoundedEventBus, DEFAULT_STORY_LABEL,
-    PROFILES, RateLimiter, STORY_PRESETS, ScenarioEvent, ScenarioState,
+    PROFILES, RateLimiter, STORY_PRESETS, NotificationSpec, SessionMix, SignalChannel,
+    ScenarioEvent, ScenarioState, build_session_mix, new_mix_code, normalize_mix_code,
     retained_chapter_index,
 )
 
@@ -129,6 +131,7 @@ class SoundBank:
         'protection_history':'warning','properties':'notification',
         'network_activity':'terminal','explorer':'files','recovery':'debrief',
         'ransom': 'ransom', 'blue': 'crash', 'reboot': 'reboot', 'debrief': 'debrief',
+        'web_notification': 'browser',
     }
 
     def __init__(self, custom_dir=None, cache_dir=None):
@@ -228,11 +231,12 @@ class WindowsToastNotifier:
     """Best-effort Windows Notification Center delivery through local WinRT APIs."""
     MIN_INTERVAL = 8.0
 
-    def __init__(self):
+    def __init__(self,events=None):
         self.executable=(shutil.which('powershell.exe') or shutil.which('pwsh.exe')) if sys.platform=='win32' else None
         self.last_sent=-self.MIN_INTERVAL
         self.threads=[]
         self.closed=False
+        self.events=events
 
     @property
     def available(self):
@@ -242,20 +246,50 @@ class WindowsToastNotifier:
     def _quote(value):
         return "'"+str(value).replace("'","''")+"'"
 
+    @staticmethod
+    def toast_xml(title,body,layout_id='adaptive_compact'):
+        title=html.escape(str(title)[:120]);body=html.escape(str(body)[:300])
+        layouts={
+            'text_fallback':
+                f'<text id="1">{title}</text><text id="2">{body}</text>',
+            'adaptive_compact':
+                f'<text hint-maxLines="1">{title}</text><text>{body}</text>',
+            'adaptive_warning':
+                f'<text>⚠  {title}</text><text hint-maxLines="3">{body}</text>'
+                '<text placement="attribution">Windows security notification</text>',
+            'adaptive_summary':
+                f'<text>{title}</text><text>{body}</text>'
+                '<progress title="Scan summary" value="1" valueStringOverride="Completed" status="Review results"/>',
+            'adaptive_success':
+                f'<text>✓  {title}</text><text>{body}</text>'
+                '<text placement="attribution">CaveDepths incident response</text>',
+        }
+        content=layouts.get(layout_id,layouts['adaptive_compact'])
+        template='ToastText02' if layout_id=='text_fallback' else 'ToastGeneric'
+        return '<toast duration="short"><visual><binding template="'+template+'">'+content+'</binding></visual></toast>'
+
     @classmethod
-    def encoded_script(cls,title,body):
-        title=cls._quote(title[:120]);body=cls._quote(body[:300])
+    def encoded_script(cls,title,body,layout_id='adaptive_compact',tag='cyber-classroom'):
+        quoted_title=cls._quote(str(title)[:120]);quoted_body=cls._quote(str(body)[:300])
+        xml=cls._quote(cls.toast_xml(title,body,layout_id))
+        tag=cls._quote(str(tag)[:64])
         script=f"""
 $ErrorActionPreference = 'Stop'
 [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] > $null
 [Windows.UI.Notifications.ToastNotification, Windows.UI.Notifications, ContentType = WindowsRuntime] > $null
 [Windows.UI.Notifications.ToastTemplateType, Windows.UI.Notifications, ContentType = WindowsRuntime] > $null
-$xml = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02)
-$nodes = $xml.GetElementsByTagName('text')
-$nodes.Item(0).AppendChild($xml.CreateTextNode({title})) > $null
-$nodes.Item(1).AppendChild($xml.CreateTextNode({body})) > $null
-$toast = [Windows.UI.Notifications.ToastNotification]::new($xml)
-$toast.Tag = 'cyber-classroom'
+[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] > $null
+$document = [Windows.Data.Xml.Dom.XmlDocument]::new()
+try {{
+    $document.LoadXml({xml})
+}} catch {{
+    $document = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02)
+    $nodes = $document.GetElementsByTagName('text')
+    $nodes.Item(0).AppendChild($document.CreateTextNode({quoted_title})) > $null
+    $nodes.Item(1).AppendChild($document.CreateTextNode({quoted_body})) > $null
+}}
+$toast = [Windows.UI.Notifications.ToastNotification]::new($document)
+$toast.Tag = {tag}
 $toast.Group = 'classroom-demo'
 $toast.ExpirationTime = [DateTimeOffset]::Now.AddMinutes(20)
 $appIds = @('Cyber Classroom', 'Microsoft.Windows.PowerShell', 'Windows PowerShell')
@@ -269,15 +303,15 @@ exit 2
 """
         return base64.b64encode(script.encode('utf-16le')).decode('ascii')
 
-    def show(self,title,body):
+    def show(self,title,body,layout_id='adaptive_compact',tag='cyber-classroom'):
         now=time.monotonic()
         if not self.available or now-self.last_sent<self.MIN_INTERVAL:
             return False
         self.last_sent=now
-        encoded=self.encoded_script(title,body)
-        return self._start(encoded,'delivery')
+        encoded=self.encoded_script(title,body,layout_id,tag)
+        return self._start(encoded,'delivery',tag)
 
-    def _start(self,encoded,operation):
+    def _start(self,encoded,operation,failure_payload=None):
         if not self.available:
             return False
         def worker():
@@ -288,8 +322,12 @@ exit 2
                     creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0),timeout=7,check=False)
                 if result.returncode:
                     LOG.warning('Windows toast %s was not accepted; exit code=%s',operation,result.returncode)
+                    if operation=='delivery' and self.events is not None:
+                        self.events.post('toast_failed',failure_payload,coalesce='toast-failed:'+str(failure_payload))
             except (OSError,subprocess.SubprocessError):
                 LOG.exception('Windows Notification Center %s failed',operation)
+                if operation=='delivery' and self.events is not None:
+                    self.events.post('toast_failed',failure_payload,coalesce='toast-failed:'+str(failure_payload))
         self.threads[:]=[thread for thread in self.threads if thread.is_alive()]
         thread=threading.Thread(target=worker,name='ClassroomToast',daemon=True)
         self.threads.append(thread);thread.start()
@@ -576,14 +614,17 @@ class NotifyIconDataW(ctypes.Structure):
 
 class OwnedTrayIcon:
     """One process-owned notification-area icon with bounded, reversible UI."""
-    WM_CLOSE=0x0010;WM_DESTROY=0x0002;WM_APP_TRAY=0x8051
+    WM_CLOSE=0x0010;WM_DESTROY=0x0002;WM_APP_TRAY=0x8051;WM_APP_COMMAND=0x8052
     WM_LBUTTONUP=0x0202;WM_LBUTTONDBLCLK=0x0203;WM_RBUTTONUP=0x0205
-    NIM_ADD=0;NIM_DELETE=2;NIF_MESSAGE=1;NIF_ICON=2;NIF_TIP=4
+    NIM_ADD=0;NIM_MODIFY=1;NIM_DELETE=2
+    NIF_MESSAGE=1;NIF_ICON=2;NIF_TIP=4;NIF_INFO=0x10
+    NIIF_NONE=0;NIIF_INFO=1;NIIF_WARNING=2;NIIF_ERROR=3;NIIF_NOSOUND=0x10
 
     def __init__(self,events,tooltip='Block Runtime Host'):
         self.events=events;self.tooltip=tooltip[:127]
         self.closed=False;self.hwnd=None;self.nid=None;self.callback=None
         self.ready=threading.Event();self.stopping=threading.Event()
+        self.commands=queue.Queue(maxsize=8)
         self.thread=threading.Thread(target=self._run,name='ClassroomTray',daemon=True)
         self.thread.start()
 
@@ -634,6 +675,26 @@ class OwnedTrayIcon:
                 elif event==self.WM_RBUTTONUP:
                     show_menu(hwnd)
                 return 0
+            if message==self.WM_APP_COMMAND:
+                try:
+                    command,payload=self.commands.get_nowait()
+                except queue.Empty:
+                    return 0
+                if command=='balloon' and self.nid is not None:
+                    title,body,severity,with_sound=payload
+                    flags={'info':self.NIIF_INFO,'success':self.NIIF_INFO,
+                           'caution':self.NIIF_WARNING,'warning':self.NIIF_WARNING,
+                           'error':self.NIIF_ERROR}.get(severity,self.NIIF_NONE)
+                    if not with_sound:flags|=self.NIIF_NOSOUND
+                    self.nid.uFlags=self.NIF_MESSAGE|self.NIF_ICON|self.NIF_TIP|self.NIF_INFO
+                    self.nid.szInfoTitle=title[:63];self.nid.szInfo=body[:255]
+                    self.nid.dwInfoFlags=flags
+                    shell.Shell_NotifyIconW(self.NIM_MODIFY,ctypes.byref(self.nid))
+                elif command=='tooltip' and self.nid is not None:
+                    self.tooltip=str(payload)[:127];self.nid.szTip=self.tooltip
+                    self.nid.uFlags=self.NIF_MESSAGE|self.NIF_ICON|self.NIF_TIP
+                    shell.Shell_NotifyIconW(self.NIM_MODIFY,ctypes.byref(self.nid))
+                return 0
             if message==self.WM_CLOSE:
                 user.DestroyWindow(hwnd);return 0
             if message==self.WM_DESTROY:
@@ -681,6 +742,123 @@ class OwnedTrayIcon:
             try:ctypes.WinDLL('user32',use_last_error=True).PostMessageW(self.hwnd,self.WM_CLOSE,0,0)
             except OSError:pass
         self.thread.join(timeout=.35)
+
+    def _post(self,command,payload):
+        if self.closed or not self.ready.wait(timeout=.3) or not self.hwnd:
+            return False
+        try:
+            self.commands.put_nowait((command,payload))
+        except queue.Full:
+            return False
+        user=ctypes.WinDLL('user32',use_last_error=True)
+        user.PostMessageW.argtypes=[wintypes.HWND,wintypes.UINT,wintypes.WPARAM,wintypes.LPARAM]
+        user.PostMessageW.restype=wintypes.BOOL
+        if not user.PostMessageW(self.hwnd,self.WM_APP_COMMAND,0,0):
+            try:self.commands.get_nowait()
+            except queue.Empty:pass
+            return False
+        return True
+
+    def show_balloon(self,title,body,severity='info',with_sound=False):
+        """Ask the tray owner thread to display one bounded native balloon."""
+        return self._post('balloon',(str(title),str(body),severity,bool(with_sound)))
+
+    def set_tooltip(self,text):
+        return self._post('tooltip',str(text))
+
+
+class FlashWindowInfo(ctypes.Structure):
+    _fields_=[('cbSize',wintypes.UINT),('hwnd',wintypes.HWND),
+              ('dwFlags',wintypes.DWORD),('uCount',wintypes.UINT),
+              ('dwTimeout',wintypes.DWORD)]
+
+
+class TaskbarController:
+    """Best-effort taskbar progress/attention for application-owned HWNDs only."""
+    TBPF_NOPROGRESS=0;TBPF_NORMAL=2;TBPF_ERROR=4;TBPF_PAUSED=8
+
+    def __init__(self):
+        self.available=False;self.pointer=None;self.active={};self.initialized=False
+        if sys.platform!='win32':return
+        try:
+            self.ole=ctypes.OleDLL('ole32');self.user=ctypes.WinDLL('user32',use_last_error=True)
+            self.ole.CoInitializeEx.argtypes=[ctypes.c_void_p,wintypes.DWORD]
+            self.ole.CoInitializeEx.restype=ctypes.c_long
+            hr=self.ole.CoInitializeEx(None,2)
+            self.initialized=hr in (0,1)
+            self.ole.CLSIDFromString.argtypes=[wintypes.LPCWSTR,ctypes.POINTER(Guid)]
+            self.ole.CLSIDFromString.restype=ctypes.c_long
+            clsid=Guid();iid=Guid()
+            if self.ole.CLSIDFromString('{56FDF344-FD6D-11d0-958A-006097C9A090}',ctypes.byref(clsid))<0:
+                return
+            if self.ole.CLSIDFromString('{EA1AFB91-9E28-4B86-90E9-9E9F8A5EEFAF}',ctypes.byref(iid))<0:
+                return
+            self.ole.CoCreateInstance.argtypes=[ctypes.POINTER(Guid),ctypes.c_void_p,wintypes.DWORD,
+                                                ctypes.POINTER(Guid),ctypes.POINTER(ctypes.c_void_p)]
+            self.ole.CoCreateInstance.restype=ctypes.c_long
+            pointer=ctypes.c_void_p()
+            if self.ole.CoCreateInstance(ctypes.byref(clsid),None,1,ctypes.byref(iid),ctypes.byref(pointer))<0:
+                return
+            self.pointer=pointer
+            table=ctypes.cast(pointer,ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))).contents
+            self._release=ctypes.WINFUNCTYPE(wintypes.ULONG,ctypes.c_void_p)(table[2])
+            self._hr_init=ctypes.WINFUNCTYPE(ctypes.c_long,ctypes.c_void_p)(table[3])
+            self._set_value=ctypes.WINFUNCTYPE(ctypes.c_long,ctypes.c_void_p,wintypes.HWND,
+                                               ctypes.c_ulonglong,ctypes.c_ulonglong)(table[9])
+            self._set_state=ctypes.WINFUNCTYPE(ctypes.c_long,ctypes.c_void_p,wintypes.HWND,
+                                               ctypes.c_int)(table[10])
+            if self._hr_init(pointer)<0:
+                self._release(pointer);self.pointer=None;return
+            self.user.FlashWindowEx.argtypes=[ctypes.POINTER(FlashWindowInfo)]
+            self.user.FlashWindowEx.restype=wintypes.BOOL
+            self.available=True
+        except (OSError,ValueError,IndexError):
+            LOG.exception('Taskbar integration is unavailable')
+
+    def signal(self,hwnd,layout_id,duration=7.0):
+        if not self.available or not hwnd:return False
+        state,value={
+            'progress':(self.TBPF_NORMAL,42),'paused':(self.TBPF_PAUSED,62),
+            'error_flash':(self.TBPF_ERROR,78),'scan_progress':(self.TBPF_NORMAL,70),
+        }.get(layout_id,(self.TBPF_NORMAL,50))
+        try:
+            if self._set_state(self.pointer,hwnd,state)<0:return False
+            if self._set_value(self.pointer,hwnd,value,100)<0:return False
+            flash=FlashWindowInfo(ctypes.sizeof(FlashWindowInfo),hwnd,0x00000002|0x0000000C,3,0)
+            self.user.FlashWindowEx(ctypes.byref(flash))
+            self.active[int(hwnd)]=(hwnd,time.monotonic()+max(1.0,duration))
+            return True
+        except (OSError,ValueError):
+            LOG.exception('Taskbar signal failed')
+            return False
+
+    def tick(self):
+        now=time.monotonic()
+        for key,(hwnd,deadline) in list(self.active.items()):
+            if now>=deadline:self.clear(hwnd)
+
+    def clear(self,hwnd=None):
+        targets=([hwnd] if hwnd else [item[0] for item in self.active.values()])
+        for target in targets:
+            if self.available and target:
+                try:
+                    self._set_state(self.pointer,target,self.TBPF_NOPROGRESS)
+                    flash=FlashWindowInfo(ctypes.sizeof(FlashWindowInfo),target,0,0,0)
+                    self.user.FlashWindowEx(ctypes.byref(flash))
+                except (OSError,ValueError):
+                    LOG.debug('Taskbar state already gone for HWND=%s',target)
+            self.active.pop(int(target or 0),None)
+
+    def close(self):
+        self.clear()
+        if self.pointer:
+            try:self._release(self.pointer)
+            except (OSError,ValueError):pass
+            self.pointer=None
+        if self.initialized:
+            try:self.ole.CoUninitialize()
+            except OSError:pass
+        self.available=False
 
 
 class NativeEffect:
@@ -842,6 +1020,7 @@ class NativeEffect:
                  role='app',resizable=False,topmost=None):
         self.ensure_registered()
         self.app=app
+        self.role=role
         self.monitor=getattr(app,'presentation_monitor',None)
         self.born=app.clock
         self.closed=False
@@ -1509,16 +1688,40 @@ def check_browser_policy(executable):
 
 CLIENT_SCRIPT = r'''
 const button=document.getElementById('action'),notice=document.getElementById('notice'),state=document.getElementById('state');
+const originalTitle=document.title;let signalSequence=-1,closeSequence=-1;
+function renderBrowserSignal(signal){
+ let box=document.getElementById('classroom-browser-signal');if(box)box.remove();
+ box=document.createElement('section');box.id='classroom-browser-signal';box.setAttribute('role','status');
+ const layouts={download_shelf:['left:auto;right:18px;bottom:18px;width:390px;border-top:4px solid #2f7d45','↓'],
+ permission_chip:['left:50%;transform:translateX(-50%);top:12px;width:460px;border-left:5px solid #b8811e','◆'],
+ account_banner:['left:18px;right:18px;top:12px;border-bottom:4px solid #60799b','!'],
+ update_strip:['left:18px;right:18px;bottom:16px;border-left:5px solid #397d72','↻']};
+ const selected=layouts[signal.layout]||layouts.download_shelf;
+ box.style.cssText='position:fixed;z-index:2147483000;padding:15px 18px;background:#fff;color:#26343e;box-shadow:0 8px 28px #0004;font:14px Segoe UI,sans-serif;'+selected[0];
+ box.innerHTML='<div style="display:flex;gap:13px;align-items:flex-start"><b style="font-size:22px">'+selected[1]+'</b><div style="flex:1"><strong></strong><p style="margin:6px 0 0"></p></div><button aria-label="Close" style="border:0;background:transparent;font-size:18px">×</button></div>';
+ box.querySelector('strong').textContent=signal.title;box.querySelector('p').textContent=signal.body;
+ box.querySelector('button').onclick=()=>box.remove();document.body.appendChild(box);
+ document.title='● '+originalTitle;
+ setTimeout(()=>{if(box.isConnected)box.remove();if(document.title.startsWith('● '))document.title=originalTitle;},7000);
+}
+function closeClassroomNotifications(){if(window.classroomNotifications){window.classroomNotifications.forEach(item=>{try{item.close()}catch(e){}});window.classroomNotifications=[];}}
+window.addEventListener('pagehide',closeClassroomNotifications);
 if(button)button.addEventListener('click',async()=>{button.disabled=true;notice.textContent='Preparing request…';
 try{const r=await fetch(ACTION_URL,{method:'POST',cache:'no-store',credentials:'omit'});if(!r.ok)throw new Error(String(r.status));
 notice.textContent='Request accepted. Check the Windows desktop.';
 }catch(e){notice.textContent='The request could not be completed.';button.disabled=false;}});
-let failures=0;async function poll(){let delay=document.hidden?5000:1000;
+let failures=0;async function poll(){let delay=window.classroomNotificationCase?250:(document.hidden?5000:1000);
 try{const r=await fetch(STATE_URL,{cache:'no-store',credentials:'omit'});if(!r.ok)throw new Error();const s=await r.json();failures=0;
 document.body.classList.toggle('paused',s.paused);state.textContent=s.paused?'Session paused':('Local session • '+s.tabs+' tabs');
+if(s.browser_signal&&s.browser_signal.sequence!==signalSequence){signalSequence=s.browser_signal.sequence;renderBrowserSignal(s.browser_signal);}
+if(s.notification_close_sequence!==closeSequence){closeSequence=s.notification_close_sequence;
+ closeClassroomNotifications();
+ const box=document.getElementById('classroom-browser-signal');if(box)box.remove();document.title=originalTitle;}
 if(s.ended)return;
 }catch(e){failures++;state.textContent='Local session unavailable';delay=Math.min(10000,1000*Math.pow(2,failures));}
 setTimeout(poll,delay);}poll();'''
+
+WEB_NOTIFICATION_PAGE = '''<!doctype html><html lang="bg"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Browser notification — manual classroom case</title><style>*{box-sizing:border-box}body{margin:0;background:#eef2f6;color:#243746;font:16px Segoe UI,sans-serif}.card{max-width:720px;margin:70px auto;background:#fff;border:1px solid #ccd5dc;padding:38px;box-shadow:0 12px 35px #24374622}.tag{color:#516a7e;font-size:13px}h1{font-size:29px}button{padding:13px 20px;background:#356b96;color:#fff;border:0;font-weight:650}#result{margin-top:20px;padding:15px;background:#eef4f8}footer{margin-top:25px;color:#667985;font-size:13px}</style></head><body><main class="card"><div class="tag">MANUAL BROWSER CASE • LOCALHOST</div><h1>Истинско browser permission</h1><p>Бутонът по-долу кара Edge/Chrome да поиска разрешение. Известието се създава само след изричен избор <b>Allow</b>.</p><p>При Stop страницата извиква <code>Notification.close()</code> и временният browser профил се премахва. Browser-owned запис в Notification Center все пак може да остане.</p><button id="web-notify">ПОИСКАЙ РАЗРЕШЕНИЕ</button><div id="result">Няма изпратено известие.</div><div id="state">Local session</div><div id="notice"></div><footer>Няма външна мрежа, service worker или постоянен профил.</footer></main><script nonce="NONCE">window.classroomNotificationCase=true;window.classroomNotifications=[];const result=document.getElementById('result');document.getElementById('web-notify').onclick=async()=>{if(!('Notification' in window)){result.textContent='Този браузър не поддържа Web Notifications.';return;}const permission=await Notification.requestPermission();if(permission!=='granted'){result.textContent='Разрешението не беше дадено: '+permission;return;}const item=new Notification('GameHub account notice',{body:'CaveDepths activity needs review.',tag:'cave-depths-manual',renotify:false});window.classroomNotifications.push(item);result.textContent='Известието беше изпратено от временния localhost профил.';};CLIENT_SCRIPT</script></body></html>'''
 
 WEB_PAGES = [
 '''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>CaveDepths — Minecraft Java Mod 1.21.1</title><link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath fill='%23549b45' d='M2 2h28v10H2z'/%3E%3Cpath fill='%23734d2b' d='M2 12h28v18H2z'/%3E%3C/svg%3E"><style>*{box-sizing:border-box}body{margin:0;background:#101820;color:#eef7f3;font:16px Segoe UI,sans-serif}nav{height:66px;display:flex;align-items:center;padding:0 5vw;background:#17242c;border-bottom:1px solid #344650}nav b{font-size:22px;color:#80c66a}nav span{margin-left:38px;color:#c3d2d8;word-spacing:18px}.local{margin-left:auto!important;color:#81949d!important;word-spacing:0!important}.hero{display:grid;grid-template-columns:1.25fr .9fr;gap:30px;max-width:1180px;margin:36px auto;padding:0 24px}.art{min-height:445px;background:linear-gradient(#77bce4 0 45%,#62a851 45% 52%,#745034 52%);position:relative;overflow:hidden;box-shadow:inset 0 0 0 1px #56717c}.art:before{content:'';position:absolute;width:110px;height:110px;left:18%;bottom:90px;background:#526d3c;box-shadow:110px -55px 0 #496236,220px 15px 0 #3c5634,330px -85px 0 #597744,440px -20px 0 #3c5634}.art strong{position:absolute;left:28px;bottom:25px;font-size:36px;text-shadow:0 2px 3px #1c2b23}.panel{background:#f5f7f4;color:#263832;padding:28px}.rating{color:#bf7b24;font-weight:700}.version{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:20px 0;padding:15px;background:#e5ebe6;font-size:13px}.notes{border-top:1px solid #ccd6d1;margin-top:20px;padding-top:17px;color:#52665f}button{width:100%;padding:15px;border:0;background:#367b42;color:#fff;font-weight:700;font-size:17px}footer,#state,#notice{font-size:12px;margin-top:13px;color:#657d75}</style></head><body><nav><b>BLOCKFORGE MODS</b><span>MODS MODPACKS MAPS SHADERS</span><span class="local">offline mirror</span></nav><main class="hero"><section class="art"><strong>CAVEDEPTHS</strong></section><aside class="panel"><small>COMMUNITY RELEASE</small><h1>CaveDepths</h1><div class="rating">★★★★★ <span style="color:#697a73;font-weight:400">1.8M downloads</span></div><p>Deep biomes, abandoned mines and new underground creatures for Minecraft Java Edition.</p><div class="version"><b>Game version</b><span>1.21.1</span><b>Loader</b><span>Fabric</span><b>Package</b><span>CaveDepths_Setup.exe</span><b>Updated</b><span>Today</span></div><button id="action">DOWNLOAD MOD</button><div class="notes"><b>Release 4.2</b><br>Crystal caverns · cave villages · performance preset</div><div id="notice"></div><div id="state">Checking…</div><footer>Локален режим • 127.0.0.1 • Minecraft is a Mojang Studios trademark.</footer></aside></main><script nonce="NONCE">CLIENT_SCRIPT</script></body></html>''',
@@ -1576,7 +1779,9 @@ class LocalPages:
         self.generation=generation
         self.max_tabs=max(1,min(ABSOLUTE_MAX_TABS,max_tabs))
         self.state={'time':0,'paused':False,'tabs':0,'ended':False,
-                    'generation':generation}
+                    'generation':generation,'browser_signal':None,
+                    'notification_close_sequence':0}
+        self.state_lock=threading.Lock();self.signal_sequence=0;self.close_sequence=0
         self.actions=queue.Queue(maxsize=8)
         self.action_lock=threading.Lock()
         self.last_action=0.0
@@ -1611,9 +1816,12 @@ class LocalPages:
                     self.send_error(404); return
                 path=self.path[len(prefix):]
                 if path=='state':
-                    payload=json.dumps(owner.state).encode('utf-8'); mime='application/json'
+                    with owner.state_lock:snapshot=dict(owner.state)
+                    payload=json.dumps(snapshot).encode('utf-8'); mime='application/json'
                 elif path.startswith('tab/') and path[4:].isdigit() and 0<=int(path[4:])<owner.max_tabs:
                     payload=owner.page(int(path[4:])).encode('utf-8'); mime='text/html'
+                elif path=='manual-notification':
+                    payload=owner.web_notification_page().encode('utf-8');mime='text/html'
                 else:
                     self.send_error(404); return
                 self.send_payload(200,payload,mime)
@@ -1657,6 +1865,36 @@ class LocalPages:
     def url(self,index):
         return f'http://127.0.0.1:{self.server.server_port}/{self.token}/tab/{index}'
 
+    def web_notification_url(self):
+        return f'http://127.0.0.1:{self.server.server_port}/{self.token}/manual-notification'
+
+    def web_notification_page(self):
+        page=WEB_NOTIFICATION_PAGE
+        for key,value in {'NONCE':self.token,'CLIENT_SCRIPT':CLIENT_SCRIPT,
+                          'STATE_URL':json.dumps('/'+self.token+'/state'),
+                          'ACTION_URL':json.dumps('/'+self.token+'/action/0')}.items():
+            page=page.replace(key,value)
+        return page
+
+    def update_state(self,clock,paused,tabs):
+        with self.state_lock:
+            self.state={**self.state,'time':clock,'paused':paused,'tabs':tabs,
+                        'ended':False,'generation':self.generation}
+
+    def set_browser_signal(self,spec,language='en'):
+        title,body=spec.text(language);self.signal_sequence+=1
+        with self.state_lock:
+            self.state={**self.state,'browser_signal':{
+                'sequence':self.signal_sequence,'id':spec.signal_id,
+                'layout':spec.surface.layout_id,'icon':spec.surface.icon_id,
+                'title':title,'body':body}}
+
+    def request_notification_close(self):
+        self.close_sequence+=1
+        with self.state_lock:
+            self.state={**self.state,'notification_close_sequence':self.close_sequence,
+                        'browser_signal':None}
+
     def action_url(self,index):
         return f'http://127.0.0.1:{self.server.server_port}/{self.token}/action/{index}'
 
@@ -1673,7 +1911,7 @@ class LocalPages:
         if self.closed:
             return
         self.closed=True
-        self.state={**self.state,'ended':True}
+        with self.state_lock:self.state={**self.state,'ended':True}
         self.server.shutdown(); self.server.server_close(); self.thread.join(timeout=1)
 
 
@@ -1728,6 +1966,12 @@ class NativeSession:
             return False
 
     def open_tab(self):
+        return self._open_browser_page(False)
+
+    def open_web_notification(self):
+        return self._open_browser_page(True)
+
+    def _open_browser_page(self,manual_notification=False):
         now=time.monotonic()
         if self.closed or self.tabs>=self.max_tabs:
             return False
@@ -1761,7 +2005,7 @@ class NativeSession:
             args.append('--new-window')
         else:
             args.append('--new-tab')
-        args.append(self.pages.url(self.tabs))
+        args.append(self.pages.web_notification_url() if manual_notification else self.pages.url(self.tabs))
         self.job.launch(self.executable,args)
         self.tabs+=1
         self.last_browser_launch=now
@@ -1769,8 +2013,7 @@ class NativeSession:
 
     def update(self,clock,paused,hide):
         if self.pages:
-            self.pages.state={'time':clock,'paused':paused,'tabs':self.tabs,'ended':False,
-                              'generation':self.generation}
+            self.pages.update_state(clock,paused,self.tabs)
         if self.job:
             now=time.monotonic()
             if not self.browser_ready:
@@ -1788,6 +2031,11 @@ class NativeSession:
 
     def drain_page_actions(self):
         return self.pages.drain_actions() if self.pages else []
+
+    def send_browser_signal(self,spec,language='en'):
+        if not self.pages or not self.browser_ready:
+            return False
+        self.pages.set_browser_signal(spec,language);return True
 
     def reveal_files(self):
         if sys.platform!='win32':
@@ -1846,6 +2094,10 @@ class NativeSession:
     def close_browser(self):
         job,pages=self.detach_browser()
         try:
+            if pages:
+                close_notifications=getattr(pages,'request_notification_close',None)
+                if close_notifications:
+                    close_notifications();time.sleep(.4)
             if job:
                 job.close()
         finally:
@@ -1866,6 +2118,10 @@ class NativeSession:
     @staticmethod
     def close_detached_browser(job,pages):
         try:
+            if pages:
+                close_notifications=getattr(pages,'request_notification_close',None)
+                if close_notifications:
+                    close_notifications();time.sleep(.4)
             if job:
                 job.close()
         finally:
@@ -1963,9 +2219,15 @@ class Classroom:
         self.story=DEFAULT_STORY
         self.timeline=list(self.story.beats)
         self.chapters=list(self.story.chapters)
+        self.mix_code=tk.StringVar(value=new_mix_code())
+        self.session_mix=build_session_mix(self.story,self.mix_code.get())
+        self.signal_index=0;self.delivered_signals=[];self.fallback_signals=set()
+        self.last_started_mix_code=None
+        self.mix_explicit=False
         self.limiter=RateLimiter()
         self.windows_profile=detect_windows_profile()
         self.monitors=enumerate_monitors()
+        self.taskbar=TaskbarController()
         self.tray_icon=None
         self.pending_branch_scene=None
         self.running = self.paused = self.closed = False
@@ -1986,7 +2248,7 @@ class Classroom:
         self.sound = tk.BooleanVar(value=False)
         self.sound_bank = SoundBank()
         self.windows_notifications = tk.BooleanVar(value=True)
-        self.toast_notifier = WindowsToastNotifier()
+        self.toast_notifier = WindowsToastNotifier(self.events)
         self.hide_on_pause = tk.BooleanVar(value=True)
         self.duration = tk.StringVar(value=DEFAULT_STORY_LABEL)
         self.monitor_choice=tk.StringVar(value=self.monitors[0].label)
@@ -2080,6 +2342,15 @@ class Classroom:
         tk.Checkbutton(pause_row, text='Windows известия', variable=self.windows_notifications,
                        bg='#101b2c', fg='#e9f1fc', selectcolor='#20354b',
                        activebackground='#101b2c', activeforeground='white').pack(side='left',padx=5)
+        mix_row=tk.Frame(r,bg='#101b2c')
+        mix_row.pack(fill='x',padx=25,pady=(0,7))
+        label(mix_row,'Код на микса:',11,'#e9f1fc').pack(side='left')
+        self.mix_entry=ttk.Entry(mix_row,textvariable=self.mix_code,width=10,font=('Consolas',11))
+        self.mix_entry.pack(side='left',padx=(8,5))
+        self.mix_entry.bind('<Return>',lambda _event:self.apply_mix_code())
+        ttk.Button(mix_row,text='Приложи',command=self.apply_mix_code).pack(side='left')
+        ttk.Button(mix_row,text='Нов микс',command=self.new_mix).pack(side='left',padx=6)
+        label(mix_row,'Replay запазва същите варианти и ред.',10,'#9bb2cc').pack(side='left',padx=8)
         display_row=tk.Frame(r,bg='#101b2c')
         display_row.pack(fill='x',padx=25,pady=(0,7))
         label(display_row,'Презентационен екран:',11,'#e9f1fc').pack(side='left')
@@ -2119,7 +2390,8 @@ class Classroom:
             ('Файлове и „криптиране“', 'files_chapter'), ('WannaCry: откуп', 'ransom'),
             ('Възстановяване', 'recovery'), ('Изкривяване на екрана', 'glitch'),
             ('Син екран', 'blue'), ('Фалшиво рестартиране', 'reboot'),
-            ('Сравнение на заплахите', 'debrief')]):
+            ('Сравнение на заплахите', 'debrief'),
+            ('Истинско browser известие', 'web_notification')]):
             ttk.Button(manual, text=title, command=lambda m=mode: self.start(m)).grid(
                 row=i//3, column=i%3, sticky='ew', padx=(0, 6), pady=3)
         for column in range(3):
@@ -2155,13 +2427,149 @@ class Classroom:
     def system_text(self,bg,en):
         return self.windows_profile.text(bg,en)
 
+    def apply_mix_code(self):
+        if self.running:
+            self.status.set('Кодът може да се смени след Stop; Replay пази текущия микс.')
+            return False
+        try:
+            code=normalize_mix_code(self.mix_code.get())
+            story=STORY_PRESETS.get(self.duration.get(),DEFAULT_STORY)
+            self.session_mix=build_session_mix(story,code)
+        except ValueError as exc:
+            self.status.set('Невалиден код на микса: '+str(exc));return False
+        self.mix_code.set(code);self.mix_explicit=True
+        self.status.set(f'Микс {code}: {len(self.session_mix.signals)} различни сигнала са готови.')
+        return True
+
+    def new_mix(self):
+        if self.running:
+            self.status.set('Първо спрете текущата история, после изберете нов микс.')
+            return
+        self.mix_code.set(new_mix_code());self.mix_explicit=True;self.apply_mix_code()
+
     def preview_sound(self):
         self.sound_bank.play('notification')
 
-    def notify_windows(self,title,body):
+    def notify_windows(self,title,body,layout_id='adaptive_compact',tag='cyber-classroom'):
         if not self.windows_notifications.get():
             return False
-        return self.toast_notifier.show(title,body)
+        return self.toast_notifier.show(title,body,layout_id,tag)
+
+    def notify_scene_windows(self,title,body,layout_id='adaptive_compact',tag='cyber-classroom'):
+        """Keep manual scene feedback, while the automatic story uses its exact signal mix."""
+        if self.mode=='auto':
+            return False
+        return self.notify_windows(title,body,layout_id,tag)
+
+    def _signal_text(self,spec):
+        return spec.text(self.windows_profile.language)
+
+    def _signal_sound(self,spec):
+        if not self.sound.get():return
+        if spec.channel in (SignalChannel.NOTIFICATION_CENTER,SignalChannel.TRAY,
+                            SignalChannel.TASKBAR):
+            alias={'error':'SystemHand','warning':'SystemExclamation',
+                   'caution':'SystemExclamation','success':'SystemAsterisk',
+                   'info':'SystemNotification'}.get(spec.surface.severity,'SystemNotification')
+            self.sound_bank.play_system(alias)
+        else:
+            self.sound_bank.play(spec.surface.sound_id)
+
+    def _owned_taskbar_hwnd(self):
+        for effect in reversed(self.effects):
+            if not effect.closed and effect.role in ('app','dialog') and effect.hwnd:
+                return effect.hwnd
+        return None
+
+    def scene_signal(self,spec,fallback=False):
+        """Render one short no-focus surface whose structure follows its layout."""
+        title,body=self._signal_text(spec);layout=spec.surface.layout_id
+        active=[effect for effect in self.effects
+                if not effect.closed and getattr(effect,'is_signal',False)]
+        while len(active)>=2:
+            active.pop(0).close()
+        icon={'download':'↓','shield':'◆','account':'●','update':'↻','progress':'▰',
+              'error':'×','scan':'⌕','runtime':'■','check':'✓','info':'i'}.get(
+                  spec.surface.icon_id,'•')
+        if layout in ('defender_card','adaptive_warning','warning_balloon','scan_progress'):
+            width,height,bg,accent=530,245,'#f4f7f8','#2c6d60'
+            e=self.effect(title,width,height,bg=bg,position='toast',role='toast')
+            if e is None:return False
+            def build(ui):
+                ui._add_label('WINDOWS SECURITY',0,0,width,44,11,True,'#ffffff',accent,self.windows_profile.font)
+                ui._add_label(icon,20,68,55,55,31,True,'#ffffff','#b86b19','Segoe UI')
+                ui._add_label(title,92,65,width-118,34,14,True,'#223746',bg,self.windows_profile.font)
+                ui._add_label(body,92,105,width-118,65,10,False,'#455863',bg,self.windows_profile.font)
+                ui._add_label(self.system_text('Източник: ','Source: ')+spec.source,20,188,350,24,9,False,'#65747d',bg,self.windows_profile.font)
+                ui._add_button('×',475,188,34,28,self.guarded(e.close),False)
+        elif layout in ('inline_banner','update_strip','progress','paused'):
+            width,height,bg,accent=640,150,'#ffffff','#2d6f9f'
+            e=self.effect(spec.source,width,height,bg=bg,position='toast',role='toast')
+            if e is None:return False
+            def build(ui):
+                ui._add_label(icon,18,27,48,48,27,True,'#ffffff',accent,'Segoe UI')
+                ui._add_label(title,82,20,500,30,13,True,'#273b49',bg,self.windows_profile.font)
+                ui._add_label(body,82,54,520,45,10,False,'#52636e',bg,self.windows_profile.font)
+                ui._add_label('▰▰▰▰▱',82,105,170,24,11,True,accent,bg,'Consolas')
+                ui._add_button('×',585,103,34,28,self.guarded(e.close),False)
+        elif layout in ('legacy_balloon','error_balloon','error_flash'):
+            width,height,bg=455,215,'#f1f1f1'
+            e=self.effect(spec.source,width,height,bg=bg,position='toast',role='toast')
+            if e is None:return False
+            def build(ui):
+                ui._set_icon(32513)
+                ui._add_label(icon,22,29,50,50,32,True,'#b12637',bg,'Segoe UI')
+                ui._add_label(title,86,25,330,34,13,True,'#2c3943',bg,self.windows_profile.font)
+                ui._add_label(body,86,67,330,70,10,False,'#4c5962',bg,self.windows_profile.font)
+                ui._add_button(self.system_text('Затвори','Close'),330,157,92,32,self.guarded(e.close),True)
+        else:
+            width,height,bg=445,178,('#242424' if self.windows_profile.generation=='windows11' else '#ffffff')
+            fg='#ffffff' if bg=='#242424' else '#243541';muted='#d1d1d1' if bg=='#242424' else '#5b6b76'
+            e=self.effect(spec.source,width,height,bg=bg,position='toast',role='toast')
+            if e is None:return False
+            def build(ui):
+                ui._add_label(icon,18,21,42,42,24,True,'#ffffff','#397d72','Segoe UI')
+                ui._add_label(title,72,17,320,30,13,True,fg,bg,self.windows_profile.font)
+                ui._add_label(body,72,52,335,58,10,False,muted,bg,self.windows_profile.font)
+                ui._add_label(time.strftime('%H:%M'),18,132,70,22,9,False,muted,bg,self.windows_profile.font)
+                ui._add_button('×',390,127,34,28,self.guarded(e.close),False)
+        e.is_signal=True;e.signal_id=spec.signal_id;e.limit=7.0
+        e.build_async(build);e.show(activate=False)
+        if fallback:LOG.info('Signal fallback=%s channel=%s',spec.signal_id,spec.channel.value)
+        return True
+
+    def emit_signal(self,spec):
+        if not self.running or self.paused:return False
+        title,body=self._signal_text(spec);success=False
+        if spec.channel is SignalChannel.BROWSER:
+            success=bool(self.session and self.session.send_browser_signal(
+                spec,self.windows_profile.language))
+        elif spec.channel is SignalChannel.IN_APP:
+            success=self.scene_signal(spec)
+        elif spec.channel is SignalChannel.TASKBAR:
+            success=self.taskbar.signal(self._owned_taskbar_hwnd(),spec.surface.layout_id)
+        elif spec.channel is SignalChannel.TRAY:
+            self.ensure_tray_icon()
+            success=bool(self.tray_icon and self.tray_icon.show_balloon(
+                title,body,spec.surface.severity,False))
+        elif spec.channel is SignalChannel.NOTIFICATION_CENTER:
+            toast_layout=('text_fallback' if self.windows_profile.generation=='windows10'
+                          else spec.surface.layout_id)
+            success=self.notify_windows(title,body,toast_layout,spec.signal_id)
+        if not success:
+            success=self.scene_signal(spec,True)
+            self.fallback_signals.add(spec.signal_id)
+        self.delivered_signals.append(spec.signal_id)
+        self._signal_sound(spec)
+        LOG.info('Signal=%s channel=%s layout=%s fallback=%s',spec.signal_id,
+                 spec.channel.value,spec.surface.layout_id,spec.signal_id in self.fallback_signals)
+        return success
+
+    def fallback_signal(self,signal_id):
+        if not self.session_mix or signal_id in self.fallback_signals:return
+        spec=self.session_mix.signal(signal_id)
+        if spec is not None and self.running and not self.paused:
+            self.fallback_signals.add(signal_id);self.scene_signal(spec,True)
 
     def ensure_tray_icon(self):
         if self.tray_icon is None or self.tray_icon.closed:
@@ -2423,6 +2831,14 @@ class Classroom:
         if self.running:
             self.status.set('Демонстрацията вече работи. Използвайте „Повтори глава“ или „Спри / изчисти“.')
             return
+        story=STORY_PRESETS.get(self.duration.get(),DEFAULT_STORY)
+        try:
+            code=normalize_mix_code(self.mix_code.get())
+            if mode=='auto' and self.last_started_mix_code==code and not self.mix_explicit:
+                code=new_mix_code()
+            session_mix=build_session_mix(story,code)
+        except ValueError as exc:
+            self.status.set('Невалиден код на микса: '+str(exc));return
         warning=('Това е контролирана учебна симулация. Ще се използват само собствени прозорци, '
                  'локални страници и осем временни учебни файла. Няма реално инсталиране, '
                  'шифроване, срив или рестартиране.\n\n'
@@ -2440,9 +2856,13 @@ class Classroom:
         self.sound_bank.stop()
         self.detach_session_cleanup()
         self.scenario.new_session()
-        self.story=STORY_PRESETS.get(self.duration.get(),DEFAULT_STORY)
+        self.story=story
+        self.mix_code.set(code)
         self.timeline=list(self.story.beats)
         self.chapters=list(self.story.chapters)
+        self.session_mix=session_mix;self.signal_index=0
+        self.delivered_signals=[];self.fallback_signals=set()
+        self.last_started_mix_code=code;self.mix_explicit=False
         self.clock = 0.0
         self.event_index = 0
         self.mode = mode
@@ -2466,8 +2886,8 @@ class Classroom:
                                        self.presentation_monitor.work_rect)
             self.last_folder=self.session.folder
             self.hide_panel()
-            LOG.info('Starting mode=%s, story=%s, display=%s, platform=%s/%s',
-                     mode,self.story.label,self.presentation_monitor.label,
+            LOG.info('Starting mode=%s, story=%s, mix=%s, signals=%s, display=%s, platform=%s/%s',
+                     mode,self.story.label,self.session_mix.code,len(self.session_mix.signals),self.presentation_monitor.label,
                      self.windows_profile.generation,self.windows_profile.language)
             self.resume_button.configure(text='Пауза', state='normal')
             if mode == 'auto':
@@ -2494,6 +2914,7 @@ class Classroom:
             self.session.update(self.clock,self.paused,self.hide_on_pause.get())
         if self.paused:
             self.sound_bank.stop()
+            self.taskbar.clear()
             if self.stage is not None:
                 self.stage.win.attributes('-topmost', False)
                 if self.hide_on_pause.get():
@@ -2554,6 +2975,7 @@ class Classroom:
         target=self.chapters[index][0]
         self.paused=False
         self.sound_bank.stop()
+        self.taskbar.clear()
         self._finish_branch_gate()
         self.close_tray_icon();self.toast_notifier.clear()
         self.clear_effects()
@@ -2573,6 +2995,10 @@ class Classroom:
             self.ensure_tray_icon()
         self.clock = target
         self.event_index = next((i for i,beat in enumerate(self.timeline) if beat.at>=target),len(self.timeline))
+        self.signal_index = next((i for i,spec in enumerate(self.session_mix.signals)
+                                  if spec.at>=target),len(self.session_mix.signals))
+        self.delivered_signals=[spec.signal_id for spec in self.session_mix.signals if spec.at<target]
+        self.fallback_signals.clear()
         try:
             self.advance(0)
         except Exception as exc:
@@ -2595,6 +3021,7 @@ class Classroom:
         self.scenario.invalidate()
         self.native_kind=None
         self.sound_bank.stop()
+        self.taskbar.clear()
         self.close_tray_icon();self.toast_notifier.clear()
         self.clear_effects()
         self.close_stage()
@@ -2616,6 +3043,7 @@ class Classroom:
         self.clear_effects()
         self.close_stage()
         self.close_tray_icon();self.toast_notifier.clear()
+        self.taskbar.close()
         self.close_session()
         self.sound_bank.close()
         self.toast_notifier.close()
@@ -2639,9 +3067,10 @@ class Classroom:
             remaining=max(0,total-elapsed)
             self.status.set(f'{"ПАУЗА" if self.paused else "В ход"}  •  '
                             f'{elapsed//60:02}:{elapsed%60:02} / остава {remaining//60:02}:{remaining%60:02}  •  '
-                            f'{chapter}')
+                            f'{chapter}  •  микс {self.session_mix.code}')
             self.chapter_status.set(f'Глава {self.scenario.chapter_index+1}/{len(self.chapters)}: {chapter}  •  '
-                                    f'{"учителско темпо" if self.teacher_paced else "автоматично"}')
+                                    f'{"учителско темпо" if self.teacher_paced else "автоматично"}  •  '
+                                    f'сигнали {len(self.delivered_signals)}/{len(self.session_mix.signals)}')
 
     def tick(self):
         if self.closed:
@@ -2679,6 +3108,8 @@ class Classroom:
                         self.record_student_choice('Block Runtime tray menu','stop')
                 elif action=='tray_error':
                     self.status.set('Tray иконата не е достъпна; историята продължава без нея.')
+                elif action=='toast_failed':
+                    self.fallback_signal(payload)
                 elif action=='cleanup_done':
                     generation,notice=payload
                     if generation==self.scenario.generation and notice:
@@ -2690,6 +3121,7 @@ class Classroom:
             self.last_tick_started=now
             dt, self.last = max(0, now-self.last), now
             self.advance(dt)
+            self.taskbar.tick()
             if self.session:
                 try:
                     self.session.update(self.clock,self.paused,self.hide_on_pause.get())
@@ -2737,6 +3169,10 @@ class Classroom:
                     self.stop('Историята приключи. Обсъдете видимите признаци и правилната реакция.')
                     return
                 self.spawn(name)
+            while self.signal_index < len(self.session_mix.signals) and self.clock+1e-7 >= self.session_mix.signals[self.signal_index].at:
+                spec=self.session_mix.signals[self.signal_index]
+                self.signal_index+=1
+                self.emit_signal(spec)
         elif self.clock >= 300:
             self.stop('Ръчният ефект приключи след 5 минути.')
             return
@@ -2814,14 +3250,14 @@ class Classroom:
         if kind in ('browser','tabs','installer','taskmanager','errorwall','updater',
                     'protection_history','properties','network_activity','terminal_chapter',
                     'glitch','explorer','files_chapter','ransom','recovery',
-                    'blue','reboot','debrief'):
+                    'blue','reboot','debrief','web_notification'):
             self.clear_effects()
             if not already_active:
                 self.close_stage()
             self.native_kind=None
             self.native_born=self.clock
             self.native_count=0
-            if self.session and kind not in ('browser','tabs'):
+            if self.session and kind not in ('browser','tabs','web_notification'):
                 self.close_browser_async()
         getattr(self, 'scene_'+kind)()
         if self.sound.get() and not already_active:
@@ -2856,6 +3292,15 @@ class Classroom:
                 self.session.open_tab()
             except Exception as exc:
                 self.native_kind=None;self.close_browser_async();self.browser_fallback(exc)
+
+    def scene_web_notification(self):
+        """Open the opt-in localhost-only browser notification teaching case."""
+        self.native_kind='web_notification'
+        try:
+            self.session.open_web_notification()
+            self.status.set('Ръчният localhost казус е отворен. Allow се иска само след учителски клик.')
+        except Exception as exc:
+            self.native_kind=None;self.close_browser_async();self.browser_fallback(exc)
 
     def browser_fallback(self,exc):
         LOG.warning('Browser scene disabled: %s',exc)
@@ -2936,7 +3381,7 @@ class Classroom:
         self.scenario.apply_event(ScenarioEvent.HELPER_STARTED)
         self.ensure_tray_icon()
         self.status.set('Block Runtime Host стартира и добави временна tray икона.')
-        self.notify_windows('Block Runtime Host','Background update service is running.')
+        self.notify_scene_windows('Block Runtime Host','Background update service is running.')
 
     def scene_helper_status(self):
         e=self.effect('Block Runtime Host',620,365,bg='#f7f8fa',position='center',role='app')
@@ -3133,8 +3578,8 @@ class Classroom:
                 e.set_text(h['headline'],'Block Runtime is up to date')
                 e.set_text(h['detail'],'Version 4.8.12 is ready.')
                 e.set_enabled(h['cancel'],False)
-                self.notify_windows('Block Runtime update',
-                                    'Block Runtime 4.8.12 is ready.')
+                self.notify_scene_windows('Block Runtime update',
+                                          'Block Runtime 4.8.12 is ready.')
         e.update_view=update;e.show()
 
     def scene_installer(self):
@@ -3236,7 +3681,7 @@ class Classroom:
             ui._add_button(self.system_text('Подробности','Details'),250,132,104,30,self.guarded(details),False)
             ui._add_button('×',360,132,32,30,self.guarded(e.close),False)
         e.build_async(build);e.limit=18;e.show(activate=False)
-        self.notify_windows('PC Defender',self.system_text(
+        self.notify_scene_windows('PC Defender',self.system_text(
             'Подозрителна активност от ModUpdateHelper.exe.',
             'Suspicious activity from ModUpdateHelper.exe.'))
 
@@ -3376,9 +3821,9 @@ class Classroom:
                 self.scenario.apply_event(ScenarioEvent.SCAN_COMPLETED)
                 e.set_text(h['status'],self.system_text('Сканирането завърши','Scan complete'))
                 e.set_enabled(h['pause'],False);e.set_enabled(h['stop'],False)
-                self.notify_windows(self.system_text('Сканирането приключи','Scan completed'),
-                                    self.system_text('Открити са 3 заплахи. Прегледайте хронологията на защитата.',
-                                                     '3 threats were found. Review Protection history.'))
+                self.notify_scene_windows(self.system_text('Сканирането приключи','Scan completed'),
+                                          self.system_text('Открити са 3 заплахи. Прегледайте хронологията на защитата.',
+                                                           '3 threats were found. Review Protection history.'))
         e.update_view = update
         e.show()
 
@@ -3540,7 +3985,7 @@ class Classroom:
                 e.set_text(h['status'],self.system_text('Отстраняването завърши','Remediation completed'))
                 e.set_text(h['detail'],self.system_text('Няма останали активни компоненти на Block Runtime.','No active Block Runtime components remain.'))
                 e.set_enabled(h['folder'],True);e.set_enabled(h['close'],True)
-                self.notify_windows('PC Defender',self.system_text(
+                self.notify_scene_windows('PC Defender',self.system_text(
                     'Отстраняването завърши. 3 заплахи са поставени под карантина.',
                     'Remediation completed. 3 threats were quarantined.'))
         e.update_view=update;e.show()

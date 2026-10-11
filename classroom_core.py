@@ -8,7 +8,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+import hashlib
 import queue
+import random
+import secrets
 import threading
 import time
 from typing import Any, Callable, Iterable
@@ -67,6 +70,106 @@ class ScenarioEvent(str, Enum):
     QUARANTINE_STARTED = "quarantine_started"
     RECOVERY_STARTED = "recovery_started"
     RECOVERY_COMPLETED = "recovery_completed"
+
+
+class SignalChannel(str, Enum):
+    """Presentation channels that can carry a secondary incident signal."""
+
+    BROWSER = "browser"
+    IN_APP = "in_app"
+    TASKBAR = "taskbar"
+    TRAY = "tray"
+    NOTIFICATION_CENTER = "notification_center"
+
+
+@dataclass(frozen=True)
+class SurfaceVariant:
+    """Visual/audio treatment chosen once for one semantic signal."""
+
+    layout_id: str
+    icon_id: str
+    severity: str
+    sound_id: str
+
+    @property
+    def key(self) -> tuple[str, str, str, str]:
+        return self.layout_id, self.icon_id, self.severity, self.sound_id
+
+
+@dataclass(frozen=True)
+class NotificationSpec:
+    """One precomputed, replay-stable secondary signal."""
+
+    signal_id: str
+    at: int
+    phase: str
+    channel: SignalChannel
+    source: str
+    title_bg: str
+    title_en: str
+    body_bg: str
+    body_en: str
+    surface: SurfaceVariant
+
+    def text(self, language: str) -> tuple[str, str]:
+        if language == "bg":
+            return self.title_bg, self.body_bg
+        return self.title_en, self.body_en
+
+    @property
+    def uniqueness_key(self) -> tuple[str, ...]:
+        return (*self.surface.key, self.title_bg, self.body_bg)
+
+
+@dataclass(frozen=True)
+class SessionMix:
+    """A complete deterministic communication plan for one lesson run."""
+
+    code: str
+    story_label: str
+    signals: tuple[NotificationSpec, ...]
+
+    def __post_init__(self) -> None:
+        if len(self.code) != 6:
+            raise ValueError("mix code must contain six characters")
+        times = [signal.at for signal in self.signals]
+        if times != sorted(times) or any(b - a < 8 for a, b in zip(times, times[1:])):
+            raise ValueError("signals must be ordered with an eight-second gap")
+        if any(a.channel == b.channel for a, b in zip(self.signals, self.signals[1:])):
+            raise ValueError("adjacent signals must use different channels")
+        if any(a.surface.icon_id == b.surface.icon_id
+               for a, b in zip(self.signals, self.signals[1:])):
+            raise ValueError("adjacent signals must use different icons")
+        if any(a.surface.severity == b.surface.severity
+               for a, b in zip(self.signals, self.signals[1:])):
+            raise ValueError("adjacent signals must use different severities")
+        if any(a.surface.sound_id == b.surface.sound_id
+               for a, b in zip(self.signals, self.signals[1:])):
+            raise ValueError("adjacent signals must use different sounds")
+        toast_times = [signal.at for signal in self.signals
+                       if signal.channel is SignalChannel.NOTIFICATION_CENTER]
+        if any(b - a < 20 for a, b in zip(toast_times, toast_times[1:])):
+            raise ValueError("notification-center signals need a twenty-second gap")
+        keys = [signal.uniqueness_key for signal in self.signals]
+        if len(keys) != len(set(keys)):
+            raise ValueError("a session mix cannot repeat the same presentation")
+
+    def signal(self, signal_id: str) -> NotificationSpec | None:
+        return next((item for item in self.signals if item.signal_id == signal_id), None)
+
+
+MIX_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+
+
+def normalize_mix_code(value: str) -> str:
+    code = "".join(character for character in value.upper() if character not in " -")
+    if len(code) != 6 or any(character not in MIX_CODE_ALPHABET for character in code):
+        raise ValueError("кодът трябва да съдържа 6 знака без I, O, 0 и 1")
+    return code
+
+
+def new_mix_code() -> str:
+    return "".join(secrets.choice(MIX_CODE_ALPHABET) for _ in range(6))
 
 
 @dataclass(frozen=True)
@@ -198,6 +301,211 @@ STORY_PRESETS = {
 }
 
 DEFAULT_STORY_LABEL = "15 минути"
+
+
+_SURFACE_CATALOG = {
+    SignalChannel.BROWSER: (
+        SurfaceVariant("download_shelf", "download", "info", "browser"),
+        SurfaceVariant("permission_chip", "shield", "warning", "tab"),
+        SurfaceVariant("account_banner", "account", "caution", "notification"),
+        SurfaceVariant("update_strip", "update", "success", "updater"),
+    ),
+    SignalChannel.IN_APP: (
+        SurfaceVariant("compact_toast", "info", "info", "notification"),
+        SurfaceVariant("defender_card", "shield", "warning", "warning"),
+        SurfaceVariant("inline_banner", "update", "caution", "updater"),
+        SurfaceVariant("legacy_balloon", "error", "error", "error"),
+    ),
+    SignalChannel.TASKBAR: (
+        SurfaceVariant("progress", "progress", "info", "installer"),
+        SurfaceVariant("paused", "update", "caution", "updater"),
+        SurfaceVariant("error_flash", "error", "error", "error"),
+        SurfaceVariant("scan_progress", "scan", "warning", "scanner"),
+    ),
+    SignalChannel.TRAY: (
+        SurfaceVariant("info_balloon", "runtime", "info", "notification"),
+        SurfaceVariant("warning_balloon", "shield", "warning", "warning"),
+        SurfaceVariant("error_balloon", "error", "error", "error"),
+        SurfaceVariant("success_balloon", "check", "success", "debrief"),
+    ),
+    SignalChannel.NOTIFICATION_CENTER: (
+        SurfaceVariant("adaptive_compact", "runtime", "info", "notification"),
+        SurfaceVariant("adaptive_warning", "shield", "warning", "warning"),
+        SurfaceVariant("adaptive_summary", "scan", "caution", "scanner"),
+        SurfaceVariant("adaptive_success", "check", "success", "debrief"),
+    ),
+}
+
+
+# source, then three BG/EN title/body alternatives.  Values are deliberately
+# coherent with ScenarioState and never claim access to real processes/files.
+_SIGNAL_COPY = {
+    "download_activity": ("Browser", (
+        ("Изтеглянето започна", "Download started", "Подготвя се CaveDepths_Setup.exe.", "Preparing CaveDepths_Setup.exe."),
+        ("Нов файл за изтегляне", "New download", "CaveDepths_Setup.exe е добавен към изтеглянията.", "CaveDepths_Setup.exe was added to downloads."),
+        ("Пакетът се получава", "Receiving package", "Проверява се локалният пакет CaveDepths.", "Checking the local CaveDepths package."),
+    )),
+    "browser_reputation": ("Browser", (
+        ("Файлът не се изтегля често", "This file is not commonly downloaded", "Проверете издателя, преди да го отворите.", "Check the publisher before opening it."),
+        ("Неизвестен издател", "Unknown publisher", "Браузърът няма данни за репутацията на този setup файл.", "The browser has no reputation data for this setup file."),
+        ("Прегледайте изтеглянето", "Review the download", "Разширението .exe не е типично за Minecraft мод.", "An .exe extension is unusual for a Minecraft mod."),
+    )),
+    "install_progress": ("CaveDepths Mod Setup", (
+        ("Инсталиране на компонент", "Installing component", "Block Runtime се подготвя във временната демонстрационна сесия.", "Block Runtime is being prepared in the temporary session."),
+        ("Настройване на CaveDepths", "Configuring CaveDepths", "Setup продължава във фонов режим.", "Setup is continuing in the background."),
+        ("Копиране на runtime файлове", "Copying runtime files", "Прогресът се показва в лентата на задачите.", "Progress is shown on the taskbar."),
+    )),
+    "helper_online": ("Block Runtime Host", (
+        ("Помощният процес стартира", "Helper started", "ModUpdateHelper.exe работи във фонов режим.", "ModUpdateHelper.exe is running in the background."),
+        ("Block Runtime е активен", "Block Runtime is active", "Отворете иконата до часовника за състояние.", "Open the notification-area icon for status."),
+        ("Фонова услуга", "Background service", "Автоматичният update channel вече е активен.", "The automatic update channel is now active."),
+    )),
+    "runtime_background": ("Block Runtime", (
+        ("Проверка за актуализация", "Checking for an update", "Runtime Host се свърза с локалната update сцена.", "Runtime Host reached the local update scene."),
+        ("Компонентът поиска внимание", "Component needs attention", "Налична е непроверена актуализация за CaveDepths.", "An unverified CaveDepths update is available."),
+        ("Update channel: Automatic", "Update channel: Automatic", "ModUpdateHelper.exe подготвя следващата стъпка.", "ModUpdateHelper.exe is preparing the next step."),
+    )),
+    "account_review": ("GameHub", (
+        ("Преглед на игровия профил", "Game profile review", "Непознат runtime е свързан с последния mod download.", "An unknown runtime is linked to the latest mod download."),
+        ("Известие за акаунта", "Account notice", "Профилът StudentPlayer чака проверка.", "The StudentPlayer profile is awaiting review."),
+        ("GameHub поиска потвърждение", "GameHub requested confirmation", "Проверете последната активност на CaveDepths.", "Review the latest CaveDepths activity."),
+    )),
+    "network_change": ("Windows network protection", (
+        ("Ново мрежово искане", "New network request", "ModUpdateHelper.exe поиска изходяща връзка.", "ModUpdateHelper.exe requested an outbound connection."),
+        ("Промяна в мрежовата активност", "Network activity changed", "Block Runtime Host започна нова локална сесия.", "Block Runtime Host started a new local session."),
+        ("Проверете достъпа до мрежата", "Review network access", "Неизвестен издател поиска private network access.", "An unknown publisher requested private-network access."),
+    )),
+    "resource_spike": ("Task Manager", (
+        ("Висока активност на процес", "High process activity", "ModUpdateHelper.exe използва повече CPU от обичайното.", "ModUpdateHelper.exe is using more CPU than expected."),
+        ("Натоварване на диска", "Disk activity", "Block Runtime Host генерира необичайна файлова активност.", "Block Runtime Host is generating unusual file activity."),
+        ("Процесът не отговаря", "Process is not responding", "Проверете ModUpdateHelper.exe в Task Manager.", "Review ModUpdateHelper.exe in Task Manager."),
+    )),
+    "updater_attention": ("Block Runtime Update", (
+        ("Актуализацията чака", "Update is waiting", "Пакетът няма проверим цифров подпис.", "The package has no verifiable digital signature."),
+        ("Проверката на пакета се забави", "Package verification delayed", "Runtime update не може да потвърди издателя.", "Runtime Update cannot confirm the publisher."),
+        ("Необходимо е действие", "Action required", "Прегледайте Block Runtime Update.", "Review Block Runtime Update."),
+    )),
+    "app_instability": ("Windows", (
+        ("Приложението спря да отговаря", "The application stopped responding", "Block Runtime Host чака решение.", "Block Runtime Host is waiting for a decision."),
+        ("Грешка в компонент", "Component error", "block_runtime.dll не можа да бъде потвърден.", "block_runtime.dll could not be verified."),
+        ("Операцията беше отказана", "The operation was denied", "CaveDepths Setup върна код 0x80070005.", "CaveDepths Setup returned 0x80070005."),
+    )),
+    "defender_attention": ("PC Defender", (
+        ("Открита е подозрителна активност", "Suspicious activity detected", "Проверява се поведението на ModUpdateHelper.exe.", "Reviewing ModUpdateHelper.exe behavior."),
+        ("Защитата изисква внимание", "Protection needs attention", "CaveDepthsLoader промени очаквания модел на поведение.", "CaveDepthsLoader changed the expected behavior pattern."),
+        ("Необходимо е сканиране", "A scan is recommended", "Проверете компонентите на Block Runtime.", "Review the Block Runtime components."),
+    )),
+    "scan_activity": ("PC Defender", (
+        ("Сканирането намери елементи", "The scan found items", "Три учебни детекции чакат преглед.", "Three classroom detections are waiting for review."),
+        ("Резултатите са готови", "Results are ready", "Отворете Protection History за подробности.", "Open Protection History for details."),
+        ("Проверката завърши", "Review completed", "CaveDepthsLoader и Block Runtime са маркирани.", "CaveDepthsLoader and Block Runtime were flagged."),
+    )),
+    "signature_notice": ("File Properties", (
+        ("Няма цифров подпис", "No digital signature", "CaveDepths_Setup.exe няма проверим подписващ издател.", "CaveDepths_Setup.exe has no verifiable signer."),
+        ("Издателят не може да бъде потвърден", "Publisher cannot be verified", "Прегледайте раздела Digital Signatures.", "Review the Digital Signatures tab."),
+        ("Свойствата изискват преглед", "File properties need review", "Signature status: Not available.", "Signature status: Not available."),
+    )),
+    "trace_observed": ("Incident Response", (
+        ("Наблюдавана е връзка", "Connection observed", "Offline trace свърза ModUpdateHelper.exe с TEST-NET адрес.", "The offline trace linked ModUpdateHelper.exe to a TEST-NET address."),
+        ("Мрежовият snapshot е готов", "Network snapshot ready", "Прегледайте синтетичната incident trace.", "Review the synthetic incident trace."),
+        ("Нов индикатор в trace", "New trace indicator", "BlockRuntimeHost.exe се появи в предварително записаните данни.", "BlockRuntimeHost.exe appeared in the prerecorded data."),
+    )),
+    "file_impact": ("File Explorer", (
+        ("Файловите имена се променят", "File names are changing", "Учебните .txt файлове получават суфикс .locked.", "The classroom .txt files are receiving a .locked suffix."),
+        ("Засегната е учебната папка", "Classroom folder affected", "Променят се само осемте притежавани файла.", "Only the eight owned files are changing."),
+        ("Видимо файлово въздействие", "Visible file impact", "Explorer показва обратимите промени на имената.", "Explorer is showing the reversible name changes."),
+    )),
+    "recovery_complete": ("PC Defender", (
+        ("Възстановяването приключи", "Recovery completed", "Имената на учебните файлове са възстановени.", "The classroom file names were restored."),
+        ("Заплахите са ограничени", "Threats contained", "Block Runtime вече не е активен.", "Block Runtime is no longer active."),
+        ("Системата е готова за преглед", "Ready for review", "Отворете учебната папка и обсъдете резултата.", "Open the classroom folder and review the result."),
+    )),
+}
+
+
+_MIX_BLUEPRINTS = {
+    "10 минути": (
+        ("delivery", ((28, SignalChannel.BROWSER), (68, SignalChannel.IN_APP)),
+         ("download_activity", "browser_reputation")),
+        ("install", ((135, SignalChannel.TASKBAR),), ("install_progress",)),
+        ("foothold", ((190, SignalChannel.TRAY), (225, SignalChannel.NOTIFICATION_CENTER),
+                      (260, SignalChannel.BROWSER)),
+         ("helper_online", "runtime_background", "account_review")),
+        ("symptoms", ((305, SignalChannel.IN_APP), (380, SignalChannel.TASKBAR)),
+         ("network_change", "resource_spike")),
+        ("recovery", ((550, SignalChannel.NOTIFICATION_CENTER),), ("recovery_complete",)),
+    ),
+    "15 минути": (
+        ("delivery", ((30, SignalChannel.BROWSER), (82, SignalChannel.IN_APP)),
+         ("download_activity", "browser_reputation")),
+        ("install", ((165, SignalChannel.TASKBAR),), ("install_progress",)),
+        ("foothold", ((235, SignalChannel.TRAY), (270, SignalChannel.NOTIFICATION_CENTER),
+                      (305, SignalChannel.BROWSER), (345, SignalChannel.IN_APP)),
+         ("helper_online", "runtime_background", "account_review", "network_change")),
+        ("symptoms", ((390, SignalChannel.TASKBAR), (435, SignalChannel.TRAY),
+                      (478, SignalChannel.IN_APP)),
+         ("resource_spike", "updater_attention", "app_instability")),
+        ("detection", ((515, SignalChannel.NOTIFICATION_CENTER), (585, SignalChannel.IN_APP)),
+         ("defender_attention", "scan_activity")),
+        ("recovery", ((850, SignalChannel.NOTIFICATION_CENTER),), ("recovery_complete",)),
+    ),
+    "20 минути": (
+        ("delivery", ((35, SignalChannel.BROWSER), (100, SignalChannel.IN_APP)),
+         ("download_activity", "browser_reputation")),
+        ("install", ((200, SignalChannel.TASKBAR),), ("install_progress",)),
+        ("foothold", ((290, SignalChannel.TRAY), (325, SignalChannel.NOTIFICATION_CENTER),
+                      (365, SignalChannel.BROWSER), (415, SignalChannel.IN_APP)),
+         ("helper_online", "runtime_background", "account_review", "network_change")),
+        ("symptoms", ((470, SignalChannel.TASKBAR), (525, SignalChannel.TRAY),
+                      (580, SignalChannel.IN_APP)),
+         ("resource_spike", "updater_attention", "app_instability")),
+        ("detection", ((635, SignalChannel.NOTIFICATION_CENTER), (700, SignalChannel.TASKBAR)),
+         ("defender_attention", "scan_activity")),
+        ("investigation", ((760, SignalChannel.IN_APP), (860, SignalChannel.BROWSER)),
+         ("signature_notice", "trace_observed")),
+        ("impact", ((1030, SignalChannel.IN_APP),), ("file_impact",)),
+        ("recovery", ((1130, SignalChannel.NOTIFICATION_CENTER),), ("recovery_complete",)),
+    ),
+}
+
+
+def build_session_mix(story: StoryPreset | str, code: str) -> SessionMix:
+    """Build a stable, non-repeating mix without using process-global randomness."""
+    preset = STORY_PRESETS[story] if isinstance(story, str) else story
+    normalized = normalize_mix_code(code)
+    digest = hashlib.blake2s(
+        f"CaveDepths|{preset.label}|{normalized}".encode("utf-8"), digest_size=16
+    ).digest()
+    rng = random.Random(int.from_bytes(digest, "big"))
+    signals: list[NotificationSpec] = []
+    previous: SurfaceVariant | None = None
+    used_surfaces: set[tuple[str, str, str, str]] = set()
+
+    for phase, slots, semantic_ids in _MIX_BLUEPRINTS[preset.label]:
+        shuffled = list(semantic_ids)
+        if len(shuffled) > 1:
+            rng.shuffle(shuffled)
+        for (at, channel), signal_id in zip(slots, shuffled):
+            source, copy_variants = _SIGNAL_COPY[signal_id]
+            title_bg, title_en, body_bg, body_en = rng.choice(copy_variants)
+            candidates = list(_SURFACE_CATALOG[channel])
+            rng.shuffle(candidates)
+            compatible = [candidate for candidate in candidates
+                          if previous is None or (
+                              candidate.icon_id != previous.icon_id
+                              and candidate.severity != previous.severity
+                              and candidate.sound_id != previous.sound_id)]
+            unused = [candidate for candidate in compatible if candidate.key not in used_surfaces]
+            # Reusing a surface later is acceptable because semantic copy remains
+            # unique; adjacency rules are never relaxed.
+            surface = (unused or compatible)[0]
+            used_surfaces.add(surface.key)
+            previous = surface
+            signals.append(NotificationSpec(
+                signal_id, at, phase, channel, source,
+                title_bg, title_en, body_bg, body_en, surface,
+            ))
+    return SessionMix(normalized, preset.label, tuple(sorted(signals, key=lambda item: item.at)))
 
 
 @dataclass
